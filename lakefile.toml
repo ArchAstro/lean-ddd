@@ -1,0 +1,11 @@
+name = "ddd"
+version = "0.1.0"
+defaultTargets = ["DDD", "Examples"]
+testDriver = "Examples"
+
+[[lean_lib]]
+name = "DDD"
+globs = ["DDD.*"]
+
+[[lean_lib]]
+name = "Examples"
