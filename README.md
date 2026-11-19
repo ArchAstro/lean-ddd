@@ -118,13 +118,13 @@ Add it to your `lakefile.toml`, pinned to a release tag:
 [[require]]
 name = "ddd"
 git = "https://github.com/ArchAstro/lean-ddd"
-rev = "v0.1.0"
+rev = "v0.1.1"
 ```
 
 Or, in a `lakefile.lean`:
 
 ```lean
-require ddd from git "https://github.com/ArchAstro/lean-ddd" @ "v0.1.0"
+require ddd from git "https://github.com/ArchAstro/lean-ddd" @ "v0.1.1"
 ```
 
 Then run `lake update ddd` and `import DDD`. Use the same Lean version as this
@@ -139,4 +139,4 @@ lake test     # builds the examples
 
 ## Licence
 
-Apache-2.0. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
