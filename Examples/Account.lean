@@ -5,14 +5,22 @@ import DDD
 
 A small, self-contained domain built on `DDD`:
 
-1. an aggregate with an invariant (the balance never goes negative),
+1. a state type that is an aggregate (`AggregateRoot Account`), with an invariant
+   (the balance never goes negative),
 2. its soundness proof, the one obligation a domain owes the framework,
 3. a policy rule written with `rule!`,
 4. commands sent through `submit`, checked with `#guard`.
 -/
 
-namespace Examples.Account
+namespace Examples
 open DDD
+
+/-- The state: one account. -/
+structure Account where
+  balance : Int
+  deriving Repr
+
+namespace Account
 
 inductive Cmd where
   | deposit (n : Nat)
@@ -28,29 +36,40 @@ inductive Why where
   | insufficientFunds
   deriving Repr
 
-/-- The balance is an `Int` so that the invariant says something. -/
-def account : Aggregate Int Cmd Evt Why where
-  init := 0
-  decide
-    | _, .deposit n => .ok [.deposited n]
-    | s, .withdraw n => if (n : Int) ≤ s then .ok [.withdrew n] else .error .insufficientFunds
-  evolve
-    | s, .deposited n => s + n
-    | s, .withdrew n => s - n
+def decide (a : Account) : Cmd → Except Why (List Evt)
+  | .deposit n => .ok [.deposited n]
+  | .withdraw n =>
+    if (n : Int) ≤ a.balance then .ok [.withdrew n] else .error .insufficientFunds
+
+def evolve (a : Account) : Evt → Account
+  | .deposited n => { a with balance := a.balance + n }
+  | .withdrew n => { a with balance := a.balance - n }
+
+/-- `Account` is an aggregate. The balance is an `Int` so that the invariant says something. -/
+instance : AggregateRoot Account where
+  Cmd := Cmd
+  Evt := Evt
+  Err := Why
+  init := { balance := 0 }
+  decide := decide
+  evolve := evolve
+
+/-- The aggregate, for `replay`, `submit` and the theorems about them. -/
+abbrev account := Aggregate.of Account
 
 /-- The balance is never negative, on any log of accepted commands. -/
-theorem nonneg_sound : account.Sound (fun s => 0 ≤ s) where
+theorem nonneg_sound : account.Sound (fun a => 0 ≤ a.balance) where
   init := by decide
   step := by
     intro s c es hs hd
     cases c with
     | deposit n =>
-      simp [account] at hd; subst hd
-      simp [Aggregate.fold, account]; omega
+      simp [AggregateRoot.decide, decide] at hd; subst hd
+      simp [Aggregate.fold, AggregateRoot.evolve, evolve]; omega
     | withdraw n =>
-      simp only [account] at hd
+      simp only [AggregateRoot.decide, decide] at hd
       split at hd
-      · cases hd; simp [Aggregate.fold, account]; omega
+      · cases hd; simp [Aggregate.fold, AggregateRoot.evolve, evolve]; omega
       · cases hd
 
 /-- The context a rule may read: here, a daily withdrawal limit. -/
@@ -58,11 +77,11 @@ structure Ctx where
   dailyLimit : Nat
 
 /-- Large withdrawals need an administrator's override. -/
-def limit : Rule Ctx Int Cmd :=
+def limit : Rule Ctx Account Cmd :=
   rule! "withdrawal-limit" product cite "account terms"
-    require (fun (ctx : Ctx) (_ : Int) (c : Cmd) =>
+    require (fun (ctx : Ctx) (_ : Account) (c : Cmd) =>
       match c with
-      | .withdraw n => decide (n ≤ ctx.dailyLimit)
+      | .withdraw n => Decidable.decide (n ≤ ctx.dailyLimit)
       | .deposit _ => true)
     else deny_unless_administrator reviewed_by ["alice", "bob"]
 
@@ -85,9 +104,10 @@ def accepted : Except (Rejection Why) (List Evt × List Finding) → Bool
 #guard !accepted (submit account [limit] .enforcing [] ctx log 0 (.deposit 1))
 
 /-- Whatever passes `submit`, the balance stays non-negative. -/
-example {rules : List (Rule Ctx Int Cmd)} {mode ovr c fs} {l l' : List Evt} {v : Nat}
+example {rules : List (Rule Ctx Account Cmd)} {mode ovr c fs} {l l' : List Evt} {v : Nat}
     (hc : account.Committed l) (h : submit account rules mode ovr ctx l v c = .ok (l', fs)) :
-    0 ≤ account.replay l' :=
+    0 ≤ (account.replay l').balance :=
   submit_inv nonneg_sound hc h
 
-end Examples.Account
+end Account
+end Examples

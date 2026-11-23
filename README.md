@@ -15,7 +15,7 @@ then applies to your domain for free.
 
 | Module | What it is |
 |---|---|
-| `DDD.Aggregate` | Aggregates (`decide`, `evolve`), replay, snapshots, sound invariants, atomic batches |
+| `DDD.Aggregate` | Aggregates (`decide`, `evolve`), replay, snapshots, sound invariants, atomic batches; `AggregateRoot`, a state type that is an aggregate |
 | `DDD.Journal` | Bitemporal journal: legal date and recorded date; as-of views |
 | `DDD.Policy` | Rules with three outcomes, override classes, assurance, modes, findings; raising a class; publishing a rule |
 | `DDD.Pack` | Dated parameters; rule packs chosen by jurisdiction and adopted version |
@@ -58,6 +58,11 @@ A bank account whose balance never goes negative (the full file, with checks, is
 import DDD
 open DDD
 
+structure Account where
+  balance : Int
+
+namespace Account
+
 inductive Cmd where
   | deposit (n : Nat)
   | withdraw (n : Nat)
@@ -69,45 +74,61 @@ inductive Evt where
 inductive Why where
   | insufficientFunds
 
-def account : Aggregate Int Cmd Evt Why where
-  init := 0
-  decide
-    | _, .deposit n => .ok [.deposited n]
-    | s, .withdraw n => if (n : Int) ≤ s then .ok [.withdrew n] else .error .insufficientFunds
-  evolve
-    | s, .deposited n => s + n
-    | s, .withdrew n => s - n
+def decide (a : Account) : Cmd → Except Why (List Evt)
+  | .deposit n => .ok [.deposited n]
+  | .withdraw n =>
+    if (n : Int) ≤ a.balance then .ok [.withdrew n] else .error .insufficientFunds
+
+def evolve (a : Account) : Evt → Account
+  | .deposited n => { a with balance := a.balance + n }
+  | .withdrew n => { a with balance := a.balance - n }
+
+/-- `Account` is an aggregate: the state type names its commands, events and rejections. -/
+instance : AggregateRoot Account where
+  Cmd := Cmd
+  Evt := Evt
+  Err := Why
+  init := { balance := 0 }
+  decide := decide
+  evolve := evolve
+
+/-- The aggregate, for `replay`, `submit` and the theorems about them. -/
+abbrev account := Aggregate.of Account
 
 /-- The one proof obligation: the invariant holds initially and every accepted command keeps it. -/
-theorem nonneg_sound : account.Sound (fun s => 0 ≤ s) where
+theorem nonneg_sound : account.Sound (fun a => 0 ≤ a.balance) where
   init := by decide
   step := by
     intro s c es hs hd
     cases c with
-    | deposit n => simp [account] at hd; subst hd; simp [Aggregate.fold, account]; omega
+    | deposit n =>
+      simp [AggregateRoot.decide, decide] at hd; subst hd
+      simp [Aggregate.fold, AggregateRoot.evolve, evolve]; omega
     | withdraw n =>
-      simp only [account] at hd
+      simp only [AggregateRoot.decide, decide] at hd
       split at hd
-      · cases hd; simp [Aggregate.fold, account]; omega
+      · cases hd; simp [Aggregate.fold, AggregateRoot.evolve, evolve]; omega
       · cases hd
 
 structure Ctx where
   dailyLimit : Nat
 
 /-- Large withdrawals need an administrator's override. -/
-def limit : Rule Ctx Int Cmd :=
+def limit : Rule Ctx Account Cmd :=
   rule! "withdrawal-limit" product cite "account terms"
-    require (fun (ctx : Ctx) (_ : Int) (c : Cmd) =>
+    require (fun (ctx : Ctx) (_ : Account) (c : Cmd) =>
       match c with
-      | .withdraw n => decide (n ≤ ctx.dailyLimit)
+      | .withdraw n => Decidable.decide (n ≤ ctx.dailyLimit)
       | .deposit _ => true)
     else deny_unless_administrator reviewed_by ["alice", "bob"]
 
 /-- Whatever passes `submit`, the balance stays non-negative. -/
-example {rules : List (Rule Ctx Int Cmd)} {mode ovr c fs} {l l' : List Evt} {v : Nat}
+example {rules : List (Rule Ctx Account Cmd)} {mode ovr c fs} {l l' : List Evt} {v : Nat}
     (hc : account.Committed l) (h : submit account rules mode ovr ⟨100⟩ l v c = .ok (l', fs)) :
-    0 ≤ account.replay l' :=
+    0 ≤ (account.replay l').balance :=
   submit_inv nonneg_sound hc h
+
+end Account
 ```
 
 ## Use it
@@ -118,13 +139,13 @@ Add it to your `lakefile.toml`, pinned to a release tag:
 [[require]]
 name = "ddd"
 git = "https://github.com/ArchAstro/lean-ddd"
-rev = "v0.1.1"
+rev = "v0.2.0"
 ```
 
 Or, in a `lakefile.lean`:
 
 ```lean
-require ddd from git "https://github.com/ArchAstro/lean-ddd" @ "v0.1.1"
+require ddd from git "https://github.com/ArchAstro/lean-ddd" @ "v0.2.0"
 ```
 
 Then run `lake update ddd` and `import DDD`. Use the same Lean version as this
