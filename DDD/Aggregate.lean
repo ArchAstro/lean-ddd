@@ -109,4 +109,45 @@ theorem batch_atomic (s : S) (cs : List C) (x : X) (h : agg.decideAll s cs = .er
   intro es h'; rw [h] at h'; cases h'
 
 end Aggregate
+
+/-! ## A state type that is an aggregate
+
+`Aggregate` is a record of functions over four types. A domain usually has one state type
+per aggregate, so the state type can carry the rest: its commands, events, rejections and
+the three functions. `Aggregate.of S` is then the record, and every theorem above applies.
+-/
+
+/-- The state type `S` is an aggregate: it names its commands, events and rejection
+reasons, and says how to start, decide and evolve. -/
+class AggregateRoot (S : Type) where
+  /-- Commands. -/
+  Cmd : Type
+  /-- Events. -/
+  Evt : Type
+  /-- Rejection reasons. -/
+  Err : Type
+  init : S
+  decide : S → Cmd → Except Err (List Evt)
+  evolve : S → Evt → S
+
+/-- The aggregate of a state type. -/
+@[reducible] def Aggregate.of (S : Type) [AggregateRoot S] :
+    Aggregate S (AggregateRoot.Cmd S) (AggregateRoot.Evt S) (AggregateRoot.Err S) where
+  init := AggregateRoot.init
+  decide := AggregateRoot.decide
+  evolve := AggregateRoot.evolve
+
+namespace Aggregate
+
+variable (S : Type) [AggregateRoot S]
+
+@[simp] theorem of_init : (Aggregate.of S).init = AggregateRoot.init := rfl
+
+@[simp] theorem of_decide (s : S) (c : AggregateRoot.Cmd S) :
+    (Aggregate.of S).decide s c = AggregateRoot.decide s c := rfl
+
+@[simp] theorem of_evolve (s : S) (e : AggregateRoot.Evt S) :
+    (Aggregate.of S).evolve s e = AggregateRoot.evolve s e := rfl
+
+end Aggregate
 end DDD
