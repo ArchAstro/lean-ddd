@@ -33,6 +33,8 @@ def main (args : List String) : IO UInt32 := do
     return 1
   IO.println "ddd-viz: building the package"
   if (← run "lake" #["build"]) != 0 then return 1
+  -- A package that depends on `ddd` doesn't import the viewer itself, so build it explicitly.
+  if (← run "lake" #["build", "DDD.Viz"]) != 0 then return 1
   let mut failed := #[]
   for s in scripts do
     IO.println s!"ddd-viz: {s}"
