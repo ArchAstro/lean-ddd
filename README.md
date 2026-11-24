@@ -151,6 +151,59 @@ require ddd from git "https://github.com/ArchAstro/lean-ddd" @ "v0.2.0"
 Then run `lake update ddd` and `import DDD`. Use the same Lean version as this
 repository's `lean-toolchain`.
 
+## Drawing a domain: `lake exe ddd-viz`
+
+Any domain built on `DDD` gets a static demo site, generated from the compiled model.
+
+```
+lake exe ddd-viz                 # every viz/domains/*.lean  →  site/
+lake exe ddd-viz path/to/X.lean  # just these
+open site/index.html
+```
+
+Each page has two views:
+
+1. **Model**: a class diagram of every type the domain declares.
+   - Each type has a stereotype: «aggregate root», «entity», «value object», «identifier», «enumeration», «choice», «commands», «events», «rejections» or «process».
+   - Boxes sit inside frames, one for each bounded context and one inside it for each aggregate.
+   - Connections can be switched on and off by type: composition, extends, reference by id, command → root → event, rejections and processes.
+   - Zoomed out, boxes shrink to their names, and the connections between two aggregates become one line labelled with their count.
+   - Boxes and frames can be dragged, and their positions are saved per browser.
+2. **Scenarios**: an object diagram for each step, built from the state each aggregate has after the step (`raw`).
+   - Each object shows its field values. Lines show what each object contains and the entities it refers to by id.
+   - An object's identity comes from its `id`, or else its role in its parent (`agentTrail[1] : Decision`).
+   - The objects shown are those the scenario creates, changes, targets or refers to. The rest of each aggregate folds into a "+N more" box, which you click to open.
+   - The command arrives next to the aggregate it targets and is accepted ✓ or refused ✕, with the reason in words. New objects are outlined in green, changed rows are marked in amber, and events appear under the command.
+
+A domain script names declarations; everything else is read from Lean (`viz/domains/Account.lean` is a complete one):
+
+```lean
+import DDD.Viz
+import MyDomain
+open DDD.Viz
+
+def spec : Spec where
+  id := "orders"; title := "Orders"; ns := `MyDomain
+  aggregates := [{ id := "order", state := `MyDomain.Order, cmd := `MyDomain.Order.Cmd,
+                   evt := `MyDomain.Order.Evt, invariants := [`MyDomain.Order.sound] }]
+  processes  := [{ id := "checkout", decl := `MyDomain.checkout }]  -- touches: inferred
+  theorems   := [`MyDomain.paid_once]
+
+def scenarios : List Scenario := [{ id := "happy", title := "An order, paid",
+  frames := play snap world₀ [submitBeat order "order" "Place it" "alice" … (.place …)] }]
+
+#eval emit spec scenarios   -- writes site/orders.html and refreshes site/index.html
+```
+
+- `submitBeat` sends one command through `submit`, with the domain's rules and context.
+- A hand-built `Beat` can run a process (set `via`) or advance a clock.
+- `snap` returns `{exists, view, raw}` for each aggregate:
+  - `raw` is the state as `ToJson`, drawn as objects using the model's types.
+  - `exists` (optional) is false until the aggregate has been created, so its empty initial state is not drawn.
+  - `view` (optional) holds readable values for the side panel.
+- `Spec.contexts` groups aggregates into bounded contexts, which are drawn as frames.
+- The viewer (`DDD/Viz/{shell.html,viewer.css,viewer.js}`, React with no build step) is read from this package at emit time, so a project that depends on `ddd` gets it as is.
+
 ## Build
 
 ```sh

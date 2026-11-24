@@ -15,24 +15,33 @@ A small, self-contained domain built on `DDD`:
 namespace Examples
 open DDD
 
-/-- The state: one account. -/
+/-- A bank account, holding a customer's balance. -/
 structure Account where
+  /-- The money in the account; it never goes below zero. -/
   balance : Int
   deriving Repr
 
 namespace Account
 
+/-- A request a customer makes of their account. -/
 inductive Cmd where
+  /-- Ask to deposit money into the account. -/
   | deposit (n : Nat)
+  /-- Ask to withdraw money from the account. -/
   | withdraw (n : Nat)
   deriving Repr
 
+/-- Something that happened to the account. -/
 inductive Evt where
+  /-- Money was deposited into the account. -/
   | deposited (n : Nat)
+  /-- Money was withdrawn from the account. -/
   | withdrew (n : Nat)
   deriving Repr
 
+/-- Why the bank refused a request on the account. -/
 inductive Why where
+  /-- The withdrawal is more than the balance. -/
   | insufficientFunds
   deriving Repr
 
@@ -54,7 +63,7 @@ instance : AggregateRoot Account where
   decide := decide
   evolve := evolve
 
-/-- The aggregate, for `replay`, `submit` and the theorems about them. -/
+/-- The account as one whole, which accepts or refuses each request and records what happened. -/
 abbrev account := Aggregate.of Account
 
 /-- The balance is never negative, on any log of accepted commands. -/
@@ -72,8 +81,9 @@ theorem nonneg_sound : account.Sound (fun a => 0 ≤ a.balance) where
       · cases hd; simp [Aggregate.fold, AggregateRoot.evolve, evolve]; omega
       · cases hd
 
-/-- The context a rule may read: here, a daily withdrawal limit. -/
+/-- The account terms the bank's rules consult, here the daily limit on withdrawals. -/
 structure Ctx where
+  /-- The daily limit: the largest withdrawal allowed without an administrator's override. -/
   dailyLimit : Nat
 
 /-- Large withdrawals need an administrator's override. -/

@@ -9,3 +9,7 @@ globs = ["DDD.*"]
 
 [[lean_lib]]
 name = "Examples"
+
+[[lean_exe]]
+name = "ddd-viz"
+root = "DDDViz.Main"
