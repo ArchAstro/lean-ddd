@@ -649,7 +649,7 @@
     return html`<div className="stage" onPointerOver=${(e) => { const g = e.target.closest && e.target.closest("[data-id]"); setHover(g ? g.getAttribute("data-id") : null); }} onPointerLeave=${() => setHover(null)}>
       <${Canvas} nodes=${nodes} conts=${conts} pos=${pos} setPos=${setPos} view=${view} setView=${setView} onSize=${setSize}
         label=${`Class diagram of ${M.d.title}`}
-        onBackground=${() => setSel(null)} onNodeClick=${(id) => (id.startsWith("more:") ? open(id.slice(5)) : setSel(id))}
+        onBackground=${() => setSel(null)} onNodeClick=${(id) => setSel(id)}
         onFrameClick=${(id) => { const f = frames(conts, nodes, pos).find((x) => x.id === id); if (f) tween(fitView(f, size, 1.2)); }}
         edgeLayer=${html`<${EdgeLayer} edges=${G.edges} byId=${byId} focus=${focus} centre=${centre} layers=${layers} far=${view.k < 0.42} frs=${Object.assign(frames(conts, nodes, pos), { k: view.k })} />`}
         nodeLayer=${(start) => nodes.map((n) => html`<${ClassNode} key=${n.id} n=${n} M=${M} k=${view.k} sel=${sel === n.id} hot=${focus && focus.has(n.id)} dim=${focus && !focus.has(n.id)} start=${start} />`)} />
@@ -681,6 +681,14 @@
     if (depth > 1) return "{…}";
     return `{${ks.slice(0, 3).map((k) => `${k}: ${fmtVal(v[k], depth + 1)}`).join(", ")}${ks.length > 3 ? ", …" : ""}}`;
   }
+  /** Money, when a field's own doc says it is counted in cents (or a currency's smallest unit). */
+  const CENTS = /\b(in (its |the )?(minor unit|cents)|smallest unit|cents of)\b/i;
+  const NO_MINOR = new Set(["JPY", "KRW", "VND", "CLP", "ISK"]);
+  function money(n, cur) {
+    const d = cur && NO_MINOR.has(cur) ? 0 : 2;
+    const v = (n / 10 ** d).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+    return cur ? `${v} ${cur}` : v;
+  }
   const isObjType = (M, t) => t && t.fields && ["aggregate", "entity", "value"].includes(M.kind(t)) && M.fields(t).length > 1;
   const idText = (v) => (v == null ? null : fmtVal(v));
 
@@ -706,6 +714,10 @@
         } else {
           let text = fmtVal(val);
           if (f.type === "String" && typeof val === "string") text = `"${val}"`;
+          if (typeof val === "number" && CENTS.test(f.doc || "")) {
+            const c = v.currency && (v.currency.code || (typeof v.currency === "string" ? v.currency : null));
+            text = money(val, c);
+          }
           const row = { name: f.name, text, doc: f.doc };
           if (g && tt && tt.kind === "identifier" && M.identifies.has(g.id) && f.name !== "id")
             row.ref = { type: M.identifies.get(g.id), values: (g.many ? val || [] : val == null ? [] : [val]).map(idText) };
@@ -788,6 +800,7 @@
     const c = a && M.ctor(a[key], name);
     const args = parts.slice(1).map((x, i) => {
       const meta = c && c.args && c.args[i];
+      if (meta && /^\d+$/.test(x.trim()) && (meta.name === "cents" || CENTS.test(meta.doc || ""))) x = money(+x);
       return { doc: meta && meta.doc, name: meta && !meta.name.includes("✝") ? argName(meta.name) : c && c.args && c.args.length === 1 ? "value" : `arg ${i + 1}`, text: human(unparen(x)) };
     });
     return { name, agg: a && a.id, args, doc: c && c.doc };
@@ -824,6 +837,15 @@
     </g>`;
   }
 
+  /** A process run: its arguments named from the last parameters of its signature. */
+  function procMessage(M, frame) {
+    const vals = splitArgs(pretty(frame.command, M.ns)).slice(1);
+    const p = M.d.processes.find((x) => x.name === frame.via || x.id === frame.via);
+    const names = p ? [...p.signature.matchAll(/\(([^():]+?)\s*:/g)].flatMap((m) => m[1].trim().split(/\s+/)) : [];
+    const tail = names.slice(Math.max(0, names.length - vals.length));
+    return { name: frame.via, kind: "process", doc: p && p.doc,
+      args: vals.map((t, i) => ({ name: tail[i] ? argName(tail[i]) : `arg ${i + 1}`, text: human(unparen(t)) })) };
+  }
   function ObjectView({ M, sc, step, phase, sel, setSel, speed, follow }) {
     const [expanded, setExpanded] = useState(() => new Set());
     useEffect(() => setExpanded(new Set()), [sc]);
@@ -834,7 +856,7 @@
     const [view, setView, tween] = useView();
     const [size, setSize] = useState({ w: 0, h: 0 });
     const [hover, setHover] = useState(null);
-    const fitted = useRef(false);
+    const fitted = useRef(false), focusAgg = useRef(null);
     const relayout = useCallback(async () => {
       const p = await layout(W.nodes, W.layoutEdges.filter((l) => l.kind === "has"), conts, { aspect: "1.9" });
       fitted.current = false; setPos(p);
@@ -873,7 +895,7 @@
       const tf = frames(conts, W.nodes.filter((n) => pos[n.id]).map((n) => ({ ...n, p: pos[n.id] })), pos).find((f) => roots[0] && f.id === "agg:" + roots[0].agg);
       const clock = frame.actor === "clock";
       const cmd = clock ? { name: frame.note, kind: "clock", args: [] }
-        : frame.via ? { name: frame.via, kind: "process", args: splitArgs(pretty(frame.command, M.ns)).slice(1).map((t, i) => ({ name: `#${i + 1}`, text: unparen(t) })) }
+        : frame.via ? procMessage(M, frame) 
         : { ...message(M, frame.command, "cmd"), kind: "command" };
       const cw = Math.round(Math.min(360, Math.max(240, tw(cmd.name, F_HEAD) + 40, ...cmd.args.map((a) => tw(`${a.name} = ${a.text}`, F_ROW) + 30))));
       const ch = HEAD + Math.max(clock ? 0 : 1, cmd.args.length) * ROW + (clock ? 6 : 36);
@@ -883,13 +905,13 @@
       const evts = (frame.ok ? frame.events : []).map((e) => {
         const m = message(M, e, "evt");
         const shownArgs = m.args.slice(0, 4);
-        const w = Math.round(Math.min(360, Math.max(220, tw(m.name, F_HEAD) + 40, ...shownArgs.map((a) => tw(`${a.name} = ${a.text}`, F_ROW) + 30))));
+        const w = cw; // the command's width: events stack under it, clear of the aggregate's frame
         const h = HEAD + shownArgs.length * ROW + PADB;
         const b = { ...m, shownArgs, x, y: ey, w, h };
         ey += h + 12;
         return b;
       });
-      for (const e of evts) e.x = x + cw - e.w;
+      for (const e of evts) e.x = x;
       return { cmd, cbox, roots, evts, clock };
     }, [world, W, step, pos]);
 
@@ -901,12 +923,24 @@
       const b = bboxOf(boxes);
       const f = fitView(b, size, 1, 56);
       if (f.k >= 0.72) return f;
+      if (msgs.roots.length > 1) {
+        // a process: all its aggregates in view matters more than reading every row
+        const all = fitView(bboxOf([msgs.cbox, ...msgs.roots.map((r) => ({ x: r.p.x, y: r.p.y, w: r.w, h: Math.min(r.h, 160) }))]), size, 1, 56);
+        if (all.k >= 0.42) return all;
+      }
       const core = bboxOf(boxes.slice(0, 1 + msgs.roots.length));
       const k = Math.min(1, Math.max(0.72, fitView(core, size, 1, 56).k));
       return { k, x: 48 - core.x * k, y: 56 - core.y * k };
     };
     const inView = (b) => b.x * view.k + view.x >= 0 && b.y * view.k + view.y >= 0 && (b.x + b.w) * view.k + view.x <= size.w && (b.y + b.h) * view.k + view.y <= size.h;
-    useEffect(() => { if (pos && size.w && world && !fitted.current) { fitted.current = true; setView(shot()); } }, [pos, size.w]);
+    useEffect(() => {
+      if (!pos || !size.w || !world || fitted.current) return;
+      fitted.current = true;
+      const f = focusAgg.current && frames(conts, W.nodes.filter((n) => pos[n.id]).map((n) => ({ ...n, p: pos[n.id] })), pos).find((x) => x.id === "agg:" + focusAgg.current);
+      focusAgg.current = null;
+      if (f) { const k = Math.min(1, Math.max(0.72, fitView(f, size, 1, 40).k)); tween({ k, x: 40 - f.x * k, y: 40 - f.y * k }); }
+      else setView(shot());
+    }, [pos, size.w]);
     useEffect(() => {
       if (!follow || !pos || !size.w || !msgs || !fitted.current) return;
       const t = shot();
@@ -925,9 +959,30 @@
       return s;
     }, [centre, shown]);
 
+    // aggregates this step touches that are out of view: a pointer at the canvas edge for each
+    const offscreen = useMemo(() => {
+      if (!pos || !size.w || !frame || frame.start) return [];
+      const touched = new Map();
+      for (const t of frame.targets || []) touched.set(t, "");
+      if (phase === 1) for (const k of [...diff.born, ...diff.changed.keys()]) { const a = k.split("/")[0]; touched.set(a, "changed"); }
+      const out = [];
+      for (const [agg, what] of touched) {
+        const n = posNode(agg);
+        if (!n) continue;
+        const box = { x: n.p.x, y: n.p.y, w: n.w, h: Math.min(n.h, 240) };
+        const sx = box.x * view.k + view.x, sy = box.y * view.k + view.y, sw = box.w * view.k, sh = box.h * view.k;
+        if (sx + sw > 0 && sx < size.w && sy + sh > 0 && sy < size.h) continue;
+        const cx = sx + sw / 2, cy = sy + sh / 2, dx = cx - size.w / 2, dy = cy - size.h / 2;
+        const arrow = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? "→" : "←") : dy > 0 ? "↓" : "↑";
+        const x = Math.max(16, Math.min(size.w - 200, cx - 70)), y = Math.max(56, Math.min(size.h - 110, cy - 14));
+        out.push({ agg, name: (M.agg(agg) || {}).name || agg, what, arrow, x, y, box });
+      }
+      return out;
+    }, [pos, size, view, step, phase]);
+
     if (!pos) return html`<div className="loading">Laying out the objects…</div>`;
     const visible = W.nodes.filter((n) => (n.more ? shown.more.get(n.agg) : shown.objs.has(n.id)) && pos[n.id]).map((n) => ({ ...n, p: pos[n.id] }));
-    const open = (agg) => setExpanded(new Set([...expanded, agg]));
+    const open = (agg) => { focusAgg.current = agg; setExpanded(new Set([...expanded, agg])); };
     const linkLayer = html`<g className="edges">${shown.links.map((l, i) => {
       const a = posNode(l.from), b = posNode(l.to);
       if (!a || !b) return null;
@@ -955,7 +1010,7 @@
         ${!msgs.cmd.args.length && !msgs.clock && html`<text className="n-more" x="14" y=${HEAD + 14}>no arguments</text>`}
         ${phase === 1 && !msgs.clock && html`<g className=${"verdict-chip " + (frame.ok ? "ok" : "bad")} transform=${`translate(8 ${msgs.cbox.h - 31})`}>
           <rect width=${msgs.cbox.w - 16} height="23" rx="6" />
-          <text x="10" y="16">${frame.ok ? "✓ accepted" : "✕ refused"}${!frame.ok && reason(frame.error, M.ns, M, frame.targets) ? html`<tspan className="why">  ${clip(reason(frame.error, M.ns, M, frame.targets), F_ROW, msgs.cbox.w - 120)}</tspan>` : null}</text></g>`}
+          <text x="10" y="16">${frame.ok ? "✓ accepted" : "✕ refused"}${frame.ok && (frame.findings || []).length ? html`<tspan className="warn">  ⚠ ${plural(frame.findings.length, "warning")}</tspan>` : null}${!frame.ok && reason(frame.error, M.ns, M, frame.targets) ? html`<tspan className="why">  ${clip(reason(frame.error, M.ns, M, frame.targets), F_ROW, msgs.cbox.w - 120)}</tspan>` : null}</text></g>`}
       </g>
       ${phase === 1 && msgs.evts.map((e, i) => {
         const root = posNode(e.agg);
@@ -975,7 +1030,7 @@
     return html`<div className="stage" onPointerOver=${(e) => { const g = e.target.closest && e.target.closest("[data-id]"); setHover(g ? g.getAttribute("data-id") : null); }} onPointerLeave=${() => setHover(null)}>
       <${Canvas} nodes=${visible} conts=${conts} pos=${pos} setPos=${setPos} view=${view} setView=${setView} onSize=${setSize}
         label=${`Object diagram: ${sc.title}, step ${step}`}
-        onBackground=${() => setSel(null)} onNodeClick=${(id) => setSel(id)}
+        onBackground=${() => setSel(null)} onNodeClick=${(id) => (id.startsWith("more:") ? open(id.slice(5)) : setSel(id))}
         onFrameClick=${(id) => { const f = frames(conts, visible, pos).find((x) => x.id === id); if (f) tween(fitView(f, size, 1.2)); }}
         edgeLayer=${linkLayer} overlay=${overlay} map=${false}
         nodeLayer=${(start) => [
@@ -988,6 +1043,10 @@
               changedRows=${phase === 1 ? diff.changed.get(n.id) : null} prevRows=${diff.was.get(n.id)} />`;
           })]} />
       <${ZoomBar} setView=${setView} size=${size} fit=${() => tween(fitView(bboxOf([world, msgs && msgs.cbox, ...(msgs ? msgs.evts : [])]), size, 1))} tidy=${() => { forget(key); relayout(); }} />
+      <${WorldFacts} sc=${sc} step=${step} className="on-canvas" />
+      ${offscreen.map((h) => html`<button key=${h.agg} className="offscreen" style=${{ left: h.x + "px", top: h.y + "px", "--h": M.hue(h.agg) }}
+          onClick=${() => tween({ ...fitView(h.box, size, 1, 56), k: Math.max(0.72, Math.min(1, fitView(h.box, size, 1, 56).k)) })}
+          aria-label=${`Show ${h.name}, off screen`}><span className="arrow">${h.arrow}</span> ${h.name}${h.what ? html`<span className="what"> · ${h.what}</span>` : null}</button>`)}
       <div className="legend"><span><svg width="30" height="10"><path d="M2,5 H28" className="edge e-has" markerStart="url(#start-has)" /></svg>contains</span>
         <span><svg width="30" height="10"><path d="M2,5 H26" className="edge e-link" markerEnd="url(#end-link)" /></svg>refers to, by id</span>
         <span><i className="sw born" />new</span><span><i className="sw changed" />changed</span></div>
@@ -1092,6 +1151,15 @@
     </div>`;
   }
 
+  /** Facts about the world a step runs in (the snapshot's `@world` entry), and which just changed. */
+  function WorldFacts({ sc, step, className }) {
+    const w = (sc.frames[step].state || {})["@world"], prev = step > 0 ? (sc.frames[step - 1].state || {})["@world"] : null;
+    if (!w || typeof w !== "object") return null;
+    return html`<div className=${"world " + (className || "")}>${Object.entries(w).map(([k, v]) => {
+      const ch = prev && JSON.stringify(prev[k]) !== JSON.stringify(v);
+      return html`<span key=${k} className=${"fact" + (ch ? " changed" : "")}><span className="k">${k}</span> ${String(fmtVal(v)).replace(/^"|"$/g, "")}</span>`;
+    })}</div>`;
+  }
   const frame0 = (f) => (f.via ? `Running ${f.via} across ${f.targets.length} aggregates…` : "The aggregate checks its rules…");
   function StepPanel({ M, sc, step, phase, go, sel }) {
     const f = sc.frames[step];
@@ -1113,6 +1181,7 @@
       <h2>${sc.title}</h2>
       ${step === 0 && html`<${Doc} text=${sc.doc} />`}
       <p className="note">${f.note}</p>
+      <${WorldFacts} sc=${sc} step=${step} />
       ${f.start && html`<p className="doc">These objects are the state the scenario starts from. Press → to send the first command.</p>`}
       ${!f.start && f.actor !== "clock" && html`
         <div className="who"><span className="badge">${f.actor || "system"}</span><span className="arrow">${f.via ? "runs the process" : "sends"}</span>
@@ -1123,6 +1192,8 @@
         ${phase === 1 ? html`<div className=${"verdict " + (f.ok ? "ok" : "bad")}><span className="mark">${f.ok ? "✓" : "✕"}</span>
           <span>${f.ok ? (f.events.length ? `Accepted: ${plural(f.events.length, "event")} recorded.` : "Accepted.") : "Refused, so nothing changed."}
           ${!f.ok && reason(f.error, M.ns, M, f.targets) && html`<span className="why">${reason(f.error, M.ns, M, f.targets)}</span>`}</span></div>` : html`<div className="verdict pending"><span className="mark">…</span><span>${frame0(f)}</span></div>`}`}
+      ${phase === 1 && f.ok && (f.findings || []).length > 0 && html`<div className="verdict warn"><span className="mark">⚠</span>
+        <span>Accepted, with ${plural(f.findings.length, "policy warning")}:${f.findings.map((x, i) => html`<span key=${i} className="why">${x}</span>`)}</span></div>`}
       ${phase === 1 && f.ok && f.events.length > 0 && html`<h3>Recorded <span className="n">${f.events.length}</span></h3>
         <div className="rows">${f.events.map((e, i) => { const m = message(M, e, "evt"); return html`<div key=${i} className="row" style=${{ "--h": M.hue(m.agg) }}>
           <div className="head"><span className="swatch" /><span className="name">${m.name}</span><span className="ty">${(M.agg(m.agg) || {}).name}</span></div>

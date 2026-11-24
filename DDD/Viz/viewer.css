@@ -327,3 +327,18 @@ svg.canvas.dragging { cursor: grabbing; }
 .glossary .gk { font-size: 12px; color: var(--faint); }
 .glossary dd { margin: 3px 0 0; font-size: 13.5px; color: var(--muted); line-height: 1.45; }
 .objdetail .row .d { font-size: 13px; color: var(--muted); }
+
+/* ---------- world facts and policy warnings ---------- */
+.world { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+.world.on-canvas { position: absolute; left: 16px; top: 16px; margin: 0; z-index: 2; }
+.fact { font: 500 13px var(--sans); background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; color: var(--ink); }
+.fact .k { color: var(--muted); font-weight: 400; }
+.fact.changed { border-color: var(--chg); background: color-mix(in oklab, var(--chg) 18%, var(--surface)); animation: factin .6s ease-out; }
+@keyframes factin { from { transform: scale(1.08); } to { transform: none; } }
+.verdict.warn { background: color-mix(in oklab, var(--chg) 16%, var(--surface)); }
+.verdict.warn .mark { color: color-mix(in oklab, var(--chg) 70%, var(--ink)); }
+.verdict-chip .warn { fill: color-mix(in oklab, var(--chg) 70%, var(--ink)); font-weight: 600; }
+.offscreen { position: absolute; z-index: 3; font: 600 13px var(--sans); color: var(--ink); background: var(--surface); border: 1.5px solid var(--h); border-radius: 999px; padding: 5px 12px; box-shadow: var(--shadow); cursor: pointer; white-space: nowrap; }
+.offscreen .arrow { color: var(--h); }
+.offscreen .what { color: var(--muted); font-weight: 400; }
+.offscreen:hover { background: color-mix(in oklab, var(--h) 10%, var(--surface)); }

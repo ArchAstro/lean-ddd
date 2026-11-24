@@ -76,10 +76,20 @@ structure Spec where
 
 /-! ## Scenarios -/
 
+/-- A policy finding, in words. -/
+def Finding.say (f : Finding) : String :=
+  match f.kind with
+  | .violation => s!"{f.rule}: broken, and recorded as a warning"
+  | .overridden a r => s!"{f.rule}: overridden by the {match a with | .administrator => "administrator" | .counsel => "counsel"}{if r.isEmpty then "" else s!" ({r})"}"
+  | .missingFact x => s!"{f.rule}: could not be checked, {x} is unknown"
+
 structure Outcome where
   ok : Bool
   error : String := ""
   events : List String := []
+  /-- What policy noted about an accepted command: rules it broke that only warn, overrides,
+  facts it could not check. -/
+  findings : List String := []
 
 /-- One step of a scenario: who does what to which aggregates, and how to run it. -/
 structure Beat (W : Type) where
@@ -115,7 +125,7 @@ def submitBeat {W Ctx S C E X : Type} [Repr C] [Repr E] [Repr X]
   run w :=
     let log := get w
     match submit agg (rules w) .enforcing [] (ctx w) log log.length c with
-    | .ok (log', _) => (set w log', { ok := true, events := newEvents log log' })
+    | .ok (log', fs) => (set w log', { ok := true, events := newEvents log log', findings := fs.map Finding.say })
     | .error why => (w, { ok := false, error := reprStr why })
 
 /-- Run beats in order. Frame 0 is the starting state; each later frame is one beat, with
@@ -125,7 +135,10 @@ A snapshot is an object per aggregate id:
 - `raw`: the state as `ToJson`; the viewer draws it as objects, using the model's types;
 - `exists` (optional, default true): false until the aggregate has been created, so the
   viewer does not draw its empty initial state as if it were a real object;
-- `view` (optional): readable values for the side panel. -/
+- `view` (optional): readable values for the side panel.
+
+An entry named `@world` is not an aggregate: it is an object of facts about the world the
+scenario runs in, such as today's date, and the viewer shows it on every step. -/
 def play {W : Type} (snap : W → List (String × Json)) (w₀ : W) (beats : List (Beat W)) : Json :=
   let frame (w : W) (b : Option (Beat W)) (o : Outcome) : Json :=
     Json.mkObj [
@@ -135,6 +148,7 @@ def play {W : Type} (snap : W → List (String × Json)) (w₀ : W) (beats : Lis
       ("targets", toJson ((b.map (·.targets)).getD [])),
       ("command", toJson ((b.map (·.command)).getD "")),
       ("ok", toJson o.ok), ("error", toJson o.error), ("events", toJson o.events),
+      ("findings", toJson o.findings),
       ("start", toJson b.isNone),
       ("state", Json.mkObj (snap w))]
   let (_, frames) := beats.foldl (fun (w, acc) b =>
@@ -357,7 +371,9 @@ private def scriptSafe (j : Json) : String :=
 does not rebuild this module when only the viewer changes), else the copy embedded when
 this module was compiled. -/
 private def asset (name embedded : String) : IO String := do
-  let roots := ("." : System.FilePath) :: (← searchPathRef.get).map (· / ".." / ".." / "..")
+  -- Where the package's sources are: here, or four levels up from its `.lake/build/lib/lean`
+  -- on the search path (how a package that depends on `ddd` finds them).
+  let roots := ("." : System.FilePath) :: (← searchPathRef.get).map (· / ".." / ".." / ".." / "..")
   for r in roots do
     let f := r / "DDD" / "Viz" / name
     if ← f.pathExists then
