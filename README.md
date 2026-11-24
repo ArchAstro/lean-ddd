@@ -173,7 +173,7 @@ Each page has two views:
    - The page starts blank. An object comes onto it at the first step that creates, changes or targets it, or that a note or `show:` names. The layout grows with the story: each step is laid out with only what is on the page by then, so objects stay together; when room is needed, they glide to their new places and only what the step brings in fades in. The context the story is mostly about sits on top, and the others in a row beneath it, so what arrives at its bottom edge is next to them.
    - Each step has a caption saying what is happening, in plain words, and notes pinned beside the objects they are about. A note whose object is off screen, or has no free spot beside it, docks under the caption; click it to go there. A note naming an object that does not exist is shown as a warning.
    - Each object shows its field values, leaving out fields that stay empty throughout. Lines show what each object contains and the entities it refers to by id.
-   - An object's identity comes from its `id`, or else its role in its parent (`agentTrail[1] : Decision`).
+   - An object's identity comes from its `id`, or else its role in its parent (`payments[1] : Payment`).
    - The command arrives next to the aggregate it targets and is accepted ✓ or refused ✕, with the reason in words. New objects are outlined in green, changed rows are marked in amber, and events appear under the command.
 
 A domain script names declarations; everything else is read from Lean (`viz/domains/Account.lean` is a complete one):
@@ -209,7 +209,7 @@ story happy "happy" "An order, paid"
 
 - `story` defines a `Scenario`. Each `|` step is a beat, followed by what to tell at that step:
   - `says: "…"` what is happening and why it matters, for someone new to the domain. Markdown.
-  - `note: "key" "…"` a note pinned to one object. A key is an aggregate id (`"order"`), or an object inside one: `aggregate/field#id`, or `aggregate/field[i]` when it has no id. It can go deeper (`report/lines#3/reading`).
+  - `note: "key" "…"` a note pinned to one object. A key is an aggregate id (`"order"`), or an object inside one: `aggregate/field#id`, or `aggregate/field[i]` when it has no id. It can go deeper (`order/items#3/discount`).
   - `show: "key", …` brings objects onto the page that the step does not change.
   - Lines before the first `|` tell the opening, blank page.
 

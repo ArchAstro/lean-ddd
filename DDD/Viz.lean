@@ -30,7 +30,7 @@ open Lean Meta Elab Command
 /-! ## What a domain says about itself -/
 
 structure AggSpec where
-  /-- Short id used by the viewer and by scenarios (`"report"`). -/
+  /-- Short id used by the viewer and by scenarios (`"account"`). -/
   id : String
   /-- The state type. -/
   state : Name
@@ -96,8 +96,8 @@ pinned to particular objects. -/
 structure Telling where
   /-- What is happening and why it matters, for someone new to the domain. -/
   say : String := ""
-  /-- Notes pinned to objects: an aggregate id (`"report"`), or an object inside one, as
-  `aggregate/field#id` (`"report/lines#3"`) or `aggregate/field[i]` when it has no id. -/
+  /-- Notes pinned to objects: an aggregate id (`"order"`), or an object inside one, as
+  `aggregate/field#id` (`"order/items#3"`) or `aggregate/field[i]` when it has no id. -/
   notes : List (String × String) := []
   /-- Objects to bring onto the page at this step though the step does not change them:
   the people involved, say. Same keys as `notes`. -/
@@ -183,17 +183,18 @@ says, for a person new to the domain, what is happening. The viewer brings objec
 page as the story reaches them.
 
 ```lean
-story samples "sample-receipts" "Three real receipts"
-  about: "The sample receipts in Chit's repository, start to finish."
-  from world₀ using snap
-  says: "A blank page. Nothing has happened yet."
-  | rep "Ana starts a report" (.start "report-1" "ana" "USD")
-    says: "Ana opens an expense report for the week. It is hers, in dollars, and empty."
-    note: "report" "Owner, currency, status: draft. No lines, no route yet."
-    show: "org/people#ana"
-  | rep "The reader drafts a line" (.addLine reader supplies)
-    says: "…"
+story limits "limits" "Deposits, a limit, an overdraft"
+  about: "The daily limit is $100; the balance never goes below zero."
+  from ([] : World) using snap
+  says: "A blank page: no account exists until the first deposit opens one."
+  | beat "Open the account with $120" (.deposit 120)
+    says: "The customer deposits $120. That first deposit brings the account into being."
+    note: "account" "The balance is everything deposited minus everything withdrawn."
+  | beat "Take out $200" (.withdraw 200)
+    says: "$200 is over the daily limit, so policy stops it."
 ```
+
+(`viz/domains/Account.lean` is the whole example.)
 
 - `says:` what is happening, in plain words. Several join into paragraphs.
 - `note: "key" "text"` a note pinned to one object. A key is an aggregate id, or an object
@@ -201,7 +202,7 @@ story samples "sample-receipts" "Three real receipts"
 - `show: "key", …` brings objects onto the page that the step does not change.
 - Lines before the first `|` describe the opening page.
 
-It defines `samples : Scenario`, for `emit`. -/
+It defines `limits : Scenario`, for `emit`. -/
 
 /-- One line of a story step. -/
 inductive StoryLine where
