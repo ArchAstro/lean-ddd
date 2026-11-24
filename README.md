@@ -151,6 +151,77 @@ require ddd from git "https://github.com/ArchAstro/lean-ddd" @ "v0.2.0"
 Then run `lake update ddd` and `import DDD`. Use the same Lean version as this
 repository's `lean-toolchain`.
 
+## Drawing a domain: `lake exe ddd-viz`
+
+Any domain built on `DDD` gets a static demo site, generated from the compiled model.
+
+```
+lake exe ddd-viz                 # every viz/domains/*.lean  →  site/
+lake exe ddd-viz path/to/X.lean  # just these
+open site/index.html
+```
+
+Each page has two views:
+
+1. **Model**: a class diagram of every type the domain declares.
+   - Each type has a stereotype: «aggregate root», «entity», «value object», «identifier», «enumeration», «choice», «commands», «events», «rejections» or «process».
+   - Boxes sit inside frames, one for each bounded context and one inside it for each aggregate.
+   - Connections can be switched on and off by type: composition, extends, reference by id, command → root → event, rejections and processes.
+   - Zoomed out, boxes shrink to their names, and the connections between two aggregates become one line labelled with their count.
+   - Boxes and frames can be dragged, and their positions are saved per browser.
+2. **Scenarios**: stories told on an object diagram, built from the state each aggregate has after each step (`raw`).
+   - The page starts blank. An object comes onto it at the first step that creates, changes or targets it, or that a note or `show:` names. The layout grows with the story: each step is laid out with only what is on the page by then, so objects stay together; when room is needed, they glide to their new places and only what the step brings in fades in. The context the story is mostly about sits on top, and the others in a row beneath it, so what arrives at its bottom edge is next to them.
+   - Each step has a caption saying what is happening, in plain words, and notes pinned beside the objects they are about. A note whose object is off screen, or has no free spot beside it, docks under the caption; click it to go there. A note naming an object that does not exist is shown as a warning.
+   - Each object shows its field values, leaving out fields that stay empty throughout. Lines show what each object contains and the entities it refers to by id.
+   - An object's identity comes from its `id`, or else its role in its parent (`payments[1] : Payment`).
+   - The command arrives next to the aggregate it targets and is accepted ✓ or refused ✕, with the reason in words. New objects are outlined in green, changed rows are marked in amber, and events appear under the command.
+
+A domain script names declarations; everything else is read from Lean (`viz/domains/Account.lean` is a complete one):
+
+```lean
+import DDD.Viz
+import MyDomain
+open DDD.Viz
+
+def spec : Spec where
+  id := "orders"; title := "Orders"; ns := `MyDomain
+  aggregates := [{ id := "order", state := `MyDomain.Order, cmd := `MyDomain.Order.Cmd,
+                   evt := `MyDomain.Order.Evt, invariants := [`MyDomain.Order.sound] }]
+  processes  := [{ id := "checkout", decl := `MyDomain.checkout }]  -- touches: inferred
+  theorems   := [`MyDomain.paid_once]
+
+def place (note : String) (c : Cmd) : Beat World :=
+  submitBeat order "order" note "alice" … c
+
+story happy "happy" "An order, paid"
+  about: "Alice orders a book and pays for it."
+  from world₀ using snap
+  says: "Nothing exists yet."
+  | place "Alice places an order" (.place "o-1" "book")
+    says: "Alice orders a book. Placing it is what creates the order."
+    note: "order" "Status: placed. Nothing is owed until it's confirmed."
+  | place "Alice pays" (.pay "o-1")
+    says: "She pays, and the order is done."
+    note: "order/payments[0]" "The payment, kept with the order."
+
+#eval emit spec [happy]   -- writes site/orders.html and refreshes site/index.html
+```
+
+- `story` defines a `Scenario`. Each `|` step is a beat, followed by what to tell at that step:
+  - `says: "…"` what is happening and why it matters, for someone new to the domain. Markdown.
+  - `note: "key" "…"` a note pinned to one object. A key is an aggregate id (`"order"`), or an object inside one: `aggregate/field#id`, or `aggregate/field[i]` when it has no id. It can go deeper (`order/items#3/discount`).
+  - `show: "key", …` brings objects onto the page that the step does not change.
+  - Lines before the first `|` tell the opening, blank page.
+
+- `submitBeat` sends one command through `submit`, with the domain's rules and context.
+- A hand-built `Beat` can run a process (set `via`) or advance a clock.
+- `snap` returns `{exists, view, raw}` for each aggregate:
+  - `raw` is the state as `ToJson`, drawn as objects using the model's types.
+  - `exists` (optional) is false until the aggregate has been created, so its empty initial state is not drawn.
+  - `view` (optional) holds readable values for the side panel.
+- `Spec.contexts` groups aggregates into bounded contexts, which are drawn as frames.
+- The viewer (`DDD/Viz/{shell.html,viewer.css,viewer.js}`, React with no build step) is read from this package at emit time, so a project that depends on `ddd` gets it as is.
+
 ## Build
 
 ```sh
