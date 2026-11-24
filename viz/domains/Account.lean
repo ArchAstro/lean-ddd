@@ -32,14 +32,24 @@ def beat (note : String) (c : Cmd) : Beat World :=
   submitBeat (C := Cmd) (E := Evt) (X := Why) account "account" note "customer"
     (fun _ => [limit]) (fun _ => ctx) id (fun _ l => l) c
 
-def scenarios : List Scenario := [
-  { id := "limits", title := "Deposits, a limit, an overdraft",
-    doc := "The daily limit is $100. A withdrawal over it is blocked by policy; one over the balance is refused by the aggregate itself.",
-    frames := play snap [] [
-      beat "Open the account with $120" (.deposit 120),
-      beat "Take out $50: within the limit and the balance" (.withdraw 50),
-      beat "Take out $200: over the daily limit, so policy blocks it" (.withdraw 200),
-      beat "Take out $90: within the limit, but only $70 is left, so the account refuses" (.withdraw 90),
-      beat "Take out the $70 that is left" (.withdraw 70) ] }]
+story limits "limits" "Deposits, a limit, an overdraft"
+  about: "The daily limit is $100. A withdrawal over it is blocked by policy; one over the balance is refused by the account itself."
+  from ([] : World) using snap
+  says: "A blank page: no account exists until the first deposit opens one."
+  | beat "Open the account with $120" (.deposit 120)
+    says: "The customer deposits $120. That first deposit is what brings the account into being."
+    note: "account" "The balance is everything deposited minus everything withdrawn: $120."
+  | beat "Take out $50" (.withdraw 50)
+    says: "A $50 withdrawal is under the $100 daily limit and within the balance, so it goes through."
+    note: "account" "$120 − $50 = $70 left."
+  | beat "Take out $200" (.withdraw 200)
+    says: "$200 is over the daily limit. The bank's policy stops it before the account is even asked; only an administrator could let it through."
+    note: "account" "Unchanged: a refused command records nothing."
+  | beat "Take out $90" (.withdraw 90)
+    says: "$90 is within the limit, so policy allows it. But only $70 is left, and the account itself refuses to go below zero."
+    note: "account" "Policy and the account check different things: the limit is the bank's rule, never going negative is the account's own."
+  | beat "Take out the $70 that is left" (.withdraw 70)
+    says: "Taking out exactly what is left is fine."
+    note: "account" "Empty, never negative. Lean proves no sequence of commands can make it negative."
 
-#eval emit spec scenarios
+#eval emit spec [limits]

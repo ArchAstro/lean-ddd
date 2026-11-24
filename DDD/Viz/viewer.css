@@ -342,3 +342,37 @@ svg.canvas.dragging { cursor: grabbing; }
 .offscreen .arrow { color: var(--h); }
 .offscreen .what { color: var(--muted); font-weight: 400; }
 .offscreen:hover { background: color-mix(in oklab, var(--h) 10%, var(--surface)); }
+
+/* ---------- stories: a caption, and notes pinned to objects ---------- */
+.tell { position: absolute; left: 16px; top: 16px; z-index: 3; max-width: min(440px, calc(100% - 200px)); display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+.tell .world { margin: 0; }
+.caption { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px 13px; box-shadow: var(--shadow); pointer-events: auto; animation: capin .35s ease-out both; }
+@keyframes capin { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.cap-head { font: 600 15px var(--sans); color: var(--ink); display: flex; gap: 9px; align-items: baseline; }
+.cap-head .n { font: 600 12px var(--mono); color: var(--muted); background: var(--sunk); border-radius: 6px; padding: 1px 6px; }
+.cap-say { margin-top: 6px; font-size: 14.5px; line-height: 1.5; color: var(--ink); }
+.cap-say p { margin: 0 0 6px; } .cap-say p:last-child { margin: 0; }
+.cap-hint { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
+.callout { position: absolute; z-index: 2; width: 270px; background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--h); border-radius: 10px; padding: 9px 12px; box-shadow: var(--shadow); font-size: 13.5px; line-height: 1.45; color: var(--ink); animation: notein .4s ease-out both; }
+.callout.l { border-left: 1px solid var(--line); border-right: 3px solid var(--h); }
+.callout::before { content: ""; position: absolute; top: 14px; width: 14px; height: 2px; background: var(--h); }
+.callout.r::before { left: -17px; } .callout.l::before { right: -17px; }
+.callout-text p { margin: 0 0 4px; } .callout-text p:last-child { margin: 0; }
+@keyframes notein { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: none; } }
+.node.obj.enter { animation: enter .5s ease-out both; }
+@keyframes enter { from { opacity: 0; } to { opacity: 1; } }
+.say { font-size: 15px; line-height: 1.5; color: var(--ink); margin: 4px 0 10px; }
+.say p { margin: 0 0 8px; }
+.callout.b, .callout.t { border-left: 1px solid var(--line); border-top: 3px solid var(--h); }
+.callout.t { border-top: 1px solid var(--line); border-bottom: 3px solid var(--h); }
+.callout.b::before { left: 16px; top: -17px; width: 2px; height: 14px; }
+.callout.t::before { left: 16px; top: auto; bottom: -17px; width: 2px; height: 14px; }
+.callout.docked { position: static; width: auto; text-align: left; font: inherit; font-size: 13.5px; cursor: pointer; pointer-events: auto; display: block; }
+.callout.docked::before { display: none; }
+.callout.docked:hover { border-color: var(--h); }
+.dock-at { display: block; font: 600 12px var(--mono); color: var(--h); margin-bottom: 3px; }
+.callout.docked.missing { --h: var(--bad); cursor: default; }
+.caption { position: relative; overflow: hidden; }
+.cap-timer { position: absolute; left: 0; bottom: 0; height: 3px; width: 100%; background: var(--focus); opacity: .55; transform-origin: left; animation: captimer linear both; }
+@keyframes captimer { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.node.obj.born, .node.obj.enter { animation-delay: var(--d, 0ms); }

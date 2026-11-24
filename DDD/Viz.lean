@@ -91,8 +91,22 @@ structure Outcome where
   facts it could not check. -/
   findings : List String := []
 
+/-- What a person reads at one step of a story: what is happening, in words, and notes
+pinned to particular objects. -/
+structure Telling where
+  /-- What is happening and why it matters, for someone new to the domain. -/
+  say : String := ""
+  /-- Notes pinned to objects: an aggregate id (`"report"`), or an object inside one, as
+  `aggregate/field#id` (`"report/lines#3"`) or `aggregate/field[i]` when it has no id. -/
+  notes : List (String × String) := []
+  /-- Objects to bring onto the page at this step though the step does not change them:
+  the people involved, say. Same keys as `notes`. -/
+  reveal : List String := []
+
 /-- One step of a scenario: who does what to which aggregates, and how to run it. -/
 structure Beat (W : Type) where
+  /-- What is told at this step. The `story` syntax fills it in. -/
+  telling : Telling := {}
   note : String
   actor : String := ""
   /-- The process it goes through, if any (a `ProcSpec` id). -/
@@ -106,6 +120,11 @@ structure Scenario where
   title : String
   doc : String := ""
   frames : Json
+
+private def tellingJson (t : Telling) : List (String × Json) :=
+  [("say", toJson t.say),
+   ("notes", Json.arr (t.notes.map fun (at_, text) => Json.mkObj [("at", toJson at_), ("text", toJson text)]).toArray),
+   ("reveal", toJson t.reveal)]
 
 /-- The events appended to a log, as text. -/
 def newEvents {E : Type} [Repr E] (before after : List E) : List String :=
@@ -139,9 +158,10 @@ A snapshot is an object per aggregate id:
 
 An entry named `@world` is not an aggregate: it is an object of facts about the world the
 scenario runs in, such as today's date, and the viewer shows it on every step. -/
-def play {W : Type} (snap : W → List (String × Json)) (w₀ : W) (beats : List (Beat W)) : Json :=
+def play {W : Type} (snap : W → List (String × Json)) (w₀ : W) (beats : List (Beat W))
+    (opening : Telling := {}) : Json :=
   let frame (w : W) (b : Option (Beat W)) (o : Outcome) : Json :=
-    Json.mkObj [
+    Json.mkObj <| tellingJson ((b.map (·.telling)).getD opening) ++ [
       ("note", toJson ((b.map (·.note)).getD "The starting state")),
       ("actor", toJson ((b.map (·.actor)).getD "")),
       ("via", match b.bind (·.via) with | some v => toJson v | none => Json.null),
@@ -155,6 +175,80 @@ def play {W : Type} (snap : W → List (String × Json)) (w₀ : W) (beats : Lis
     let (w', o) := b.run w
     (w', acc ++ [frame w' (some b) o])) (w₀, [frame w₀ none { ok := true }])
   Json.arr frames.toArray
+
+/-! ## Stories: scenarios written to be read
+
+A `story` is a scenario with words. It starts from a blank page; each step runs one beat and
+says, for a person new to the domain, what is happening. The viewer brings objects onto the
+page as the story reaches them.
+
+```lean
+story samples "sample-receipts" "Three real receipts"
+  about: "The sample receipts in Chit's repository, start to finish."
+  from world₀ using snap
+  says: "A blank page. Nothing has happened yet."
+  | rep "Ana starts a report" (.start "report-1" "ana" "USD")
+    says: "Ana opens an expense report for the week. It is hers, in dollars, and empty."
+    note: "report" "Owner, currency, status: draft. No lines, no route yet."
+    show: "org/people#ana"
+  | rep "The reader drafts a line" (.addLine reader supplies)
+    says: "…"
+```
+
+- `says:` what is happening, in plain words. Several join into paragraphs.
+- `note: "key" "text"` a note pinned to one object. A key is an aggregate id, or an object
+  inside one: `aggregate/field#id`, or `aggregate/field[i]` for one with no id.
+- `show: "key", …` brings objects onto the page that the step does not change.
+- Lines before the first `|` describe the opening page.
+
+It defines `samples : Scenario`, for `emit`. -/
+
+/-- One line of a story step. -/
+inductive StoryLine where
+  | says (text : String)
+  | note (at_ text : String)
+  | show (keys : List String)
+
+/-- A step's lines, gathered into what is told. -/
+def Telling.of (ls : List StoryLine) : Telling := ls.foldl (fun t l => match l with
+  | .says x => { t with say := if t.say.isEmpty then x else t.say ++ "\n\n" ++ x }
+  | .note a x => { t with notes := t.notes ++ [(a, x)] }
+  | .show ks => { t with reveal := t.reveal ++ ks }) {}
+
+/-- A scenario from a story: its opening lines and its steps, each a beat with what it tells. -/
+def tell {W : Type} (id title doc : String) (snap : W → List (String × Json)) (w₀ : W)
+    (opening : List StoryLine) (steps : List (Beat W × List StoryLine)) : Scenario :=
+  { id, title, doc,
+    frames := play snap w₀ (steps.map fun (b, ls) => { b with telling := Telling.of ls })
+      (Telling.of opening) }
+
+declare_syntax_cat storyLine
+syntax "says: " str : storyLine
+syntax "note: " str str : storyLine
+syntax "show: " str,+ : storyLine
+
+declare_syntax_cat storyStep
+syntax "| " term (ppLine storyLine)* : storyStep
+
+syntax (docComment)? "story " ident str str ("about: " str)? " from " term " using " term
+  (ppLine storyLine)* (ppLine storyStep)* : command
+
+syntax "story_line% " storyLine : term
+macro_rules
+  | `(story_line% says: $t:str) => `(StoryLine.says $t)
+  | `(story_line% note: $a:str $t:str) => `(StoryLine.note $a $t)
+  | `(story_line% show: $ks:str,*) => `(StoryLine.show [$ks,*])
+
+syntax "story_step% " storyStep : term
+macro_rules
+  | `(story_step% | $b:term $ls:storyLine*) => `(($b, [$[story_line% $ls],*]))
+
+macro_rules
+  | `($[$doc:docComment]? story $n:ident $id:str $title:str $[about: $ab:str]? from $w:term using $snap:term
+      $ls:storyLine* $steps:storyStep*) => do
+    let about : TSyntax `str := ab.getD (Syntax.mkStrLit "")
+    `($[$doc:docComment]? def $n : Scenario :=
+        tell $id $title $about $snap $w [$[story_line% $ls],*] [$[story_step% $steps],*])
 
 /-! ## Reading the environment -/
 

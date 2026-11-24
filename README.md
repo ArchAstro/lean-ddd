@@ -169,10 +169,11 @@ Each page has two views:
    - Connections can be switched on and off by type: composition, extends, reference by id, command → root → event, rejections and processes.
    - Zoomed out, boxes shrink to their names, and the connections between two aggregates become one line labelled with their count.
    - Boxes and frames can be dragged, and their positions are saved per browser.
-2. **Scenarios**: an object diagram for each step, built from the state each aggregate has after the step (`raw`).
-   - Each object shows its field values. Lines show what each object contains and the entities it refers to by id.
+2. **Scenarios**: stories told on an object diagram, built from the state each aggregate has after each step (`raw`).
+   - The page starts blank. An object comes onto it at the first step that creates, changes or targets it, or that a note or `show:` names. The layout grows with the story: each step is laid out with only what is on the page by then, so objects stay together; when room is needed, they glide to their new places and only what the step brings in fades in. The context the story is mostly about sits on top, and the others in a row beneath it, so what arrives at its bottom edge is next to them.
+   - Each step has a caption saying what is happening, in plain words, and notes pinned beside the objects they are about. A note whose object is off screen, or has no free spot beside it, docks under the caption; click it to go there. A note naming an object that does not exist is shown as a warning.
+   - Each object shows its field values, leaving out fields that stay empty throughout. Lines show what each object contains and the entities it refers to by id.
    - An object's identity comes from its `id`, or else its role in its parent (`agentTrail[1] : Decision`).
-   - The objects shown are those the scenario creates, changes, targets or refers to. The rest of each aggregate folds into a "+N more" box, which you click to open.
    - The command arrives next to the aggregate it targets and is accepted ✓ or refused ✕, with the reason in words. New objects are outlined in green, changed rows are marked in amber, and events appear under the command.
 
 A domain script names declarations; everything else is read from Lean (`viz/domains/Account.lean` is a complete one):
@@ -189,11 +190,28 @@ def spec : Spec where
   processes  := [{ id := "checkout", decl := `MyDomain.checkout }]  -- touches: inferred
   theorems   := [`MyDomain.paid_once]
 
-def scenarios : List Scenario := [{ id := "happy", title := "An order, paid",
-  frames := play snap world₀ [submitBeat order "order" "Place it" "alice" … (.place …)] }]
+def place (note : String) (c : Cmd) : Beat World :=
+  submitBeat order "order" note "alice" … c
 
-#eval emit spec scenarios   -- writes site/orders.html and refreshes site/index.html
+story happy "happy" "An order, paid"
+  about: "Alice orders a book and pays for it."
+  from world₀ using snap
+  says: "Nothing exists yet."
+  | place "Alice places an order" (.place "o-1" "book")
+    says: "Alice orders a book. Placing it is what creates the order."
+    note: "order" "Status: placed. Nothing is owed until it's confirmed."
+  | place "Alice pays" (.pay "o-1")
+    says: "She pays, and the order is done."
+    note: "order/payments[0]" "The payment, kept with the order."
+
+#eval emit spec [happy]   -- writes site/orders.html and refreshes site/index.html
 ```
+
+- `story` defines a `Scenario`. Each `|` step is a beat, followed by what to tell at that step:
+  - `says: "…"` what is happening and why it matters, for someone new to the domain. Markdown.
+  - `note: "key" "…"` a note pinned to one object. A key is an aggregate id (`"order"`), or an object inside one: `aggregate/field#id`, or `aggregate/field[i]` when it has no id. It can go deeper (`report/lines#3/reading`).
+  - `show: "key", …` brings objects onto the page that the step does not change.
+  - Lines before the first `|` tell the opening, blank page.
 
 - `submitBeat` sends one command through `submit`, with the domain's rules and context.
 - A hand-built `Beat` can run a process (set `via`) or advance a clock.

@@ -294,6 +294,7 @@
   }
   async function layout(nodes, edges, conts, opts = {}) {
     const pos = {};
+    const inside = (cid, top) => { for (let c = cid; c; c = (conts.find((x) => x.id === c) || {}).parent) if (c === top) return true; return false; };
     const kidsOf = (id) => conts.filter((c) => c.parent === id);
     const own = (id) => nodes.filter((n) => n.container === id);
     // returns a box {id, w, h, place(ox, oy)} for a container, or null if empty
@@ -311,6 +312,18 @@
     const tops = (await Promise.all(conts.filter((c) => !c.parent || !conts.some((p) => p.id === c.parent)).map(build))).filter(Boolean);
     const loose = nodes.filter((n) => !conts.some((c) => c.id === n.container));
     if (loose.length) { const b = await elkBlock("loose", loose, edges, opts); tops.push({ id: "loose", w: b.w, h: b.h, place: (ox, oy) => { for (const k in b.at) pos[k] = { x: ox + b.at[k].x, y: oy + b.at[k].y }; } }); }
+    if (opts.lead && tops.length > 1) {
+      // A story: the context it starts in on top, the others in a row beneath it, in the order
+      // they came in. The newest objects of the lead context arrive at its bottom edge, next to
+      // the others; when it grows, the row beneath moves down as one.
+      const rank = (t) => { if (inside("agg:" + opts.lead, t.id)) return -1; const i = nodes.findIndex((n) => inside(n.container, t.id)); return i < 0 ? 1e9 : i; };
+      const sorted = [...tops].sort((a, b) => rank(a) - rank(b));
+      const [lead, ...rest] = sorted;
+      const row = shelf(rest, 1e3, 70);
+      lead.place(0, 0);
+      for (const t of rest) t.place(row.at[t.id].x, lead.h + 70 + row.at[t.id].y);
+      return pos;
+    }
     const all = shelf(tops, opts.aspect || 1.7, 70);
     for (const t of tops) t.place(all.at[t.id].x, all.at[t.id].y);
     return pos;
@@ -746,30 +759,46 @@
 
   /** The objects worth drawing: whatever the scenario creates, changes or targets, what holds them,
    *  and what they refer to. The rest of each aggregate folds into one "+N more" box. */
-  function relevantKeys(M, sc, per) {
-    const R = new Set();
-    const up = (k) => { const parts = k.split("/"); for (let i = 1; i <= parts.length; i++) R.add(parts.slice(0, i).join("/")); };
-    for (const f of sc.frames) for (const t of f.targets || []) up(t);
-    for (let i = 1; i < per.length; i++) {
+  /** When each object comes onto the page. A story starts from a blank page: an object appears
+   *  at the first step that creates, changes or targets it, or names it in a note or `show:`, and
+   *  whatever holds it comes with it. Once on the page it stays where it is. */
+  function revealSchedule(sc, per) {
+    const at = new Map();
+    const put = (k, i) => { const parts = k.split("/"); for (let j = 1; j <= parts.length; j++) { const p = parts.slice(0, j).join("/"); if (!at.has(p)) at.set(p, i); } };
+    sc.frames.forEach((f, i) => {
+      for (const k of [...(f.reveal || []), ...(f.notes || []).map((n) => n.at)]) put(k, i);
+      if (i === 0) return;
       const a = per[i - 1].objs, b = per[i].objs;
-      for (const [k, o] of b) {
-        const p = a.get(k);
-        if (!p || o.rows.some((r, j) => !p.rows[j] || p.rows[j].text !== r.text)) up(k);
-      }
-      for (const k of a.keys()) if (!b.has(k)) up(k);
-    }
-    for (const { links } of per) for (const l of links) if (l.kind === "ref" && R.has(l.from)) up(l.to);
-    return R;
+      for (const t of f.targets || []) if (b.has(t)) put(t, i);
+      for (const [k, o] of b) { const p = a.get(k); if (!p || o.rows.some((r, j) => !p.rows[j] || p.rows[j].text !== r.text)) put(k, i); }
+    });
+    return at;
   }
-  function scenarioWorld(M, sc, expanded) {
+  function scenarioWorld(M, sc) {
     const per = sc.frames.map((f) => objectsOf(M, f));
-    const R = relevantKeys(M, sc, per);
-    const keep = (o) => R.has(o.key) || expanded.has(o.agg);
+    // A row that is empty at every step says nothing, and neither does one that holds a default
+    // (zero, false) and never changes. Leave them out; the kept rows are the same at every step.
+    const EMPTY = new Set(["[]", "—", '""', "{}"]);
+    const DEFAULT = (t) => /^(0|0\.0+|false|none|0\.00 [A-Z]{3})$/.test(t);
+    const said = new Map(), texts = new Map();
+    for (const fr of per) for (const [k, o] of fr.objs) o.rows.forEach((r) => { const id = k + "\u0000" + r.name; if (!texts.has(id)) texts.set(id, new Set()); texts.get(id).add(r.text); });
+    const speaks = (k, r) => { const ts = texts.get(k + "\u0000" + r.name); return [...ts].some((t) => !EMPTY.has(t)) && !(ts.size === 1 && DEFAULT(r.text)); };
+    for (const fr of per) for (const [k, o] of fr.objs) o.rows.forEach((r) => { if (speaks(k, r)) { if (!said.has(k)) said.set(k, new Set()); said.get(k).add(r.name); } });
     for (const fr of per) {
-      const hidden = new Map();
-      for (const [k, o] of [...fr.objs]) if (!keep(o)) { fr.objs.delete(k); hidden.set(o.agg, (hidden.get(o.agg) || 0) + 1); }
+      const remap = new Map();
+      for (const [k, o] of fr.objs) {
+        const keep = said.get(k) || new Set(), m = new Map(), rows = [];
+        o.rows.forEach((r, j) => { if (keep.has(r.name)) { m.set(j, rows.length); rows.push(r); } });
+        o.rows = rows; remap.set(k, m);
+      }
+      fr.links = fr.links.filter((l) => l.row == null || (remap.get(l.from) && remap.get(l.from).has(l.row)))
+        .map((l) => (l.row == null ? l : { ...l, row: remap.get(l.from).get(l.row) }));
+    }
+    const at = revealSchedule(sc, per);
+    for (const fr of per) {
+      for (const k of [...fr.objs.keys()]) if (!at.has(k)) fr.objs.delete(k);
       fr.links = fr.links.filter((l) => fr.objs.has(l.from) && fr.objs.has(l.to));
-      fr.more = hidden;
+      fr.more = new Map();
     }
     const union = new Map();
     for (const fr of per) for (const [agg, n] of fr.more) {
@@ -789,7 +818,7 @@
     }
     const links = new Map();
     for (const { links: ls } of per) for (const l of ls) links.set(l.from + ">" + l.to, l);
-    return { per, nodes: [...union.values()], layoutEdges: [...links.values()] };
+    return { per, at, nodes: [...union.values()], layoutEdges: [...links.values()] };
   }
 
   /** A command or event, with its arguments named from the model. */
@@ -816,10 +845,10 @@
       <text className="n-more" x="13" y=${OHEAD + 14}>unchanged in this scenario · click to show</text>
     </g>`;
   }
-  function ObjNode({ o, n, M, sel, state, start, changedRows, prevRows }) {
+  function ObjNode({ o, n, M, sel, state, start, changedRows, prevRows, delay = 0 }) {
     const p = n.p, w = n.w, h = OHEAD + o.rows.length * ROW + PADB;
     return html`<g className=${`node obj${o.key === o.agg ? " root" : ""}${sel ? " sel" : ""} ${state || ""}`} transform=${`translate(${p.x} ${p.y})`}
-        style=${{ "--h": M.hue(o.agg) }} onPointerDown=${(e) => start(e, { kind: "node", id: o.key })} data-id=${o.key}
+        style=${{ "--h": M.hue(o.agg), "--d": delay + "ms" }} onPointerDown=${(e) => start(e, { kind: "node", id: o.key })} data-id=${o.key}
         tabIndex="0" role="button" aria-label=${objLabel(M, o) + (state === "born" ? ", new" : state === "changed" ? ", changed" : "")}>
       <rect className="n-body" width=${w} height=${h} rx="8" />
       ${o.key === o.agg && html`<path className="n-rootband" d=${`M0,8 a8,8 0 0 1 8,-8 h${w - 16} a8,8 0 0 1 8,8 v-3 h${-w} z`} />`}
@@ -846,26 +875,56 @@
     return { name: frame.via, kind: "process", doc: p && p.doc,
       args: vals.map((t, i) => ({ name: tail[i] ? argName(tail[i]) : `arg ${i + 1}`, text: human(unparen(t)) })) };
   }
-  function ObjectView({ M, sc, step, phase, sel, setSel, speed, follow }) {
-    const [expanded, setExpanded] = useState(() => new Set());
-    useEffect(() => setExpanded(new Set()), [sc]);
-    const W = useMemo(() => scenarioWorld(M, sc, expanded), [M, sc, expanded]);
+  function ObjectView({ M, sc, step, phase, playing, sel, setSel, speed, follow }) {
+    const W = useMemo(() => scenarioWorld(M, sc), [M, sc]);
     const conts = useMemo(() => containers(M, false).filter((c) => c.kind !== "shared"), [M]);
-    const key = `ddd-viz:${M.d.id}:objects:${sc.id}:${[...expanded].sort().join(",")}:v4`;
-    const [pos, setPos] = useState(null);
     const [view, setView, tween] = useView();
     const [size, setSize] = useState({ w: 0, h: 0 });
     const [hover, setHover] = useState(null);
     const fitted = useRef(false), focusAgg = useRef(null);
+
+    /* The layout grows with the story: each step is laid out with only the objects on the page by
+       then, so they stay together instead of leaving room for what comes later. Objects are given
+       to ELK in the order they arrived, which keeps each layout close to the one before. */
+    const [layouts, setLayouts] = useState(null);
     const relayout = useCallback(async () => {
-      const p = await layout(W.nodes, W.layoutEdges.filter((l) => l.kind === "has"), conts, { aspect: "1.9" });
-      fitted.current = false; setPos(p);
+      const edges = W.layoutEdges.filter((l) => l.kind === "has");
+      // the story is mostly about the aggregate its commands target most often
+      const hits = new Map();
+      for (const f of sc.frames) for (const t of f.targets || []) { const a = t.split("/")[0]; hits.set(a, (hits.get(a) || 0) + 1); }
+      const lead = [...hits].sort((a, b) => b[1] - a[1])[0];
+      const order = [...W.nodes].sort((a, b) => (W.at.get(a.id) ?? 1e9) - (W.at.get(b.id) ?? 1e9));
+      const out = []; let sig = null, last = null;
+      for (let i = 0; i < sc.frames.length; i++) {
+        const ns = order.filter((n) => W.at.get(n.id) <= i && (W.per[i].objs.has(n.id) || (i > 0 && W.per[i - 1].objs.has(n.id))));
+        const ws = ns.map((n) => n.id).join("|");
+        // Inside a context, aggregates sit side by side; contexts are placed by `lead` (see layout).
+        if (ws !== sig) { last = await layout(ns, edges, conts, { aspect: 60, lead: lead ? lead[0] : "" }); sig = ws; }
+        out.push(last);
+      }
+      fitted.current = false; setLayouts(out);
     }, [W]);
+    useEffect(() => { setLayouts(null); relayout(); }, [W]);
+    /** Where things are going: this step's layout, or the last step's while the command arrives. */
+    const tpos = layouts && layouts[phase === 0 && step > 0 ? step - 1 : step];
+    /** Where things are drawn: gliding to `tpos`. */
+    const [pos, setPos] = useState(null);
+    const posRef = useRef(null); posRef.current = pos;
     useEffect(() => {
-      const saved = loadPos(key);
-      if (saved && W.nodes.every((n) => saved[n.id])) setPos(saved); else relayout();
-    }, [W]);
-    useEffect(() => { if (pos) { const t = setTimeout(() => savePos(key, pos), 300); return () => clearTimeout(t); } }, [pos]);
+      if (!tpos) return;
+      const from = posRef.current;
+      if (!from || reduced()) { setPos(tpos); return; }
+      const t0 = performance.now(), ms = 700 / speed; let raf;
+      const tick = (now) => {
+        const t = Math.min(1, (now - t0) / ms), e = t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+        const p = {};
+        for (const k in tpos) { const a = from[k], b = tpos[k]; p[k] = a ? { x: a.x + (b.x - a.x) * e, y: a.y + (b.y - a.y) * e } : b; }
+        setPos(p);
+        if (t < 1) raf = requestAnimationFrame(tick);
+      };
+      raf = requestAnimationFrame(tick);
+      return () => cancelAnimationFrame(raf);
+    }, [tpos]);
 
     const frame = sc.frames[step];
     const cur = W.per[step], before = step > 0 ? W.per[step - 1] : cur;
@@ -887,8 +946,12 @@
     }, [W, step]);
 
     // the message lane, left of the objects
-    const world = useMemo(() => pos && bboxOf(W.nodes.map((n) => pos[n.id] && { x: pos[n.id].x, y: pos[n.id].y, w: n.w, h: n.h })), [pos, W]);
-    const msgs = useMemo(() => {
+    const worldOf = (P) => P && bboxOf(W.nodes.map((n) => P[n.id] && { x: P[n.id].x, y: P[n.id].y, w: n.w, h: n.h }));
+    const world = useMemo(() => worldOf(pos), [pos, W]);
+    /** The command and its events, placed left of what it targets, for positions `P`. */
+    const msgsFor = (P) => {
+      const world = worldOf(P), pos = P;
+      const posNode = (k) => { const n = nodeOf.get(k); return n && P && P[k] ? { ...n, p: P[k] } : null; };
       if (!world || !frame || frame.start) return null;
       const roots = frame.targets.map((t) => posNode(t)).filter(Boolean);
       const cy = roots.length ? Math.min(...roots.map((r) => r.p.y)) + 10 : world.y + 40;
@@ -913,43 +976,69 @@
       });
       for (const e of evts) e.x = x;
       return { cmd, cbox, roots, evts, clock };
-    }, [world, W, step, pos]);
+    };
+    const msgs = useMemo(() => msgsFor(pos), [world, W, step, pos]);
 
     /** Where the camera should be for this step: the command, its target and what changed, never smaller than readable. */
-    const shot = () => {
-      if (!msgs) return openView(world, size);
+    /** The part of the canvas the story's caption leaves free. */
+    const tellRef = useRef(null);
+    const stage = () => { const t = tellRef.current; const top = t ? t.offsetTop + t.offsetHeight + 8 : 0; return { top, w: size.w, h: Math.max(200, size.h - top - 56) }; };
+    const fitIn = (box, maxK, pad) => { const st = stage(); const f = fitView(box, { w: st.w, h: st.h }, maxK, pad); return { ...f, y: f.y + st.top }; };
+    const shot = (P = tpos || pos) => {
+      const msgs = msgsFor(P), pos = P;
+      const posNode = (k) => { const n = nodeOf.get(k); return n && P && P[k] ? { ...n, p: P[k] } : null; };
+      if (!msgs) {
+        const vis = W.nodes.filter((n) => pos[n.id] && W.at.get(n.id) <= step && sc.frames[step] && W.per[step].objs.has(n.id)).map((n) => ({ x: pos[n.id].x, y: pos[n.id].y, w: n.w, h: n.h }));
+        return vis.length ? fitIn(bboxOf(vis), 1, 80) : { k: 1, x: size.w / 2, y: stage().top + 80 };
+      }
+      const entered = W.nodes.filter((n) => W.at.get(n.id) === step).map((n) => n.id);
+      const noted = (frame.notes || []).map((x) => x.at);
+      if (noted.length) {
+        // A story step: what the notes are about must be readable; the command comes along if it fits.
+        const nb = noted.map(posNode).filter(Boolean).map((n) => ({ x: n.p.x, y: n.p.y, w: n.w + 300, h: Math.min(n.h, 240) }));
+        const eb = entered.map(posNode).filter(Boolean).map((n) => ({ x: n.p.x, y: n.p.y, w: n.w, h: Math.min(n.h, 240) }));
+        const rb = msgs.roots.map((r) => ({ x: r.p.x, y: r.p.y, w: r.w, h: Math.min(r.h, 200) }));
+        for (const set of [[msgs.cbox, ...rb, ...nb, ...eb], [msgs.cbox, ...nb], [...rb, ...nb], nb]) {
+          if (!set.length) continue;
+          const f = fitIn(bboxOf(set), 1, 48);
+          if (f.k >= 0.62) return f;
+        }
+        const first = posNode(noted[0]);
+        if (first) {
+          const fb = { x: first.p.x, y: first.p.y, w: first.w + 300, h: Math.min(first.h, 320) };
+          for (const set of [[msgs.cbox, fb], [fb]]) { const f = fitIn(bboxOf(set), 1, 48); if (f.k >= 0.62) return f; }
+          const st = stage(), k = 0.75;
+          return { k, x: st.w / 2 - (fb.x + fb.w / 2) * k, y: st.top + 40 - fb.y * k };
+        }
+      }
       const boxes = [msgs.cbox, ...msgs.roots.map((r) => ({ x: r.p.x, y: r.p.y, w: r.w, h: Math.min(r.h, 260) })), ...msgs.evts.slice(0, 3)];
-      for (const k of [...diff.born, ...diff.changed.keys()].slice(0, 6)) { const n = posNode(k); if (n) boxes.push({ x: n.p.x, y: n.p.y, w: n.w, h: Math.min(n.h, 200) }); }
+      for (const k of [...new Set([...noted, ...diff.born, ...diff.changed.keys(), ...entered])].slice(0, 8)) {
+        const n = posNode(k); if (n) boxes.push({ x: n.p.x, y: n.p.y, w: n.w + (noted.includes(k) ? 300 / Math.max(view.k, 0.5) : 0), h: Math.min(n.h, 200) });
+      }
       const b = bboxOf(boxes);
-      const f = fitView(b, size, 1, 56);
+      const f = fitIn(b, 1, 56);
       if (f.k >= 0.72) return f;
       if (msgs.roots.length > 1) {
         // a process: all its aggregates in view matters more than reading every row
-        const all = fitView(bboxOf([msgs.cbox, ...msgs.roots.map((r) => ({ x: r.p.x, y: r.p.y, w: r.w, h: Math.min(r.h, 160) }))]), size, 1, 56);
+        const all = fitIn(bboxOf([msgs.cbox, ...msgs.roots.map((r) => ({ x: r.p.x, y: r.p.y, w: r.w, h: Math.min(r.h, 160) }))]), 1, 56);
         if (all.k >= 0.42) return all;
       }
       const core = bboxOf(boxes.slice(0, 1 + msgs.roots.length));
-      const k = Math.min(1, Math.max(0.72, fitView(core, size, 1, 56).k));
-      return { k, x: 48 - core.x * k, y: 56 - core.y * k };
+      const k = Math.min(1, Math.max(0.72, fitIn(core, 1, 56).k));
+      return { k, x: 48 - core.x * k, y: stage().top + 40 - core.y * k };
     };
-    const inView = (b) => b.x * view.k + view.x >= 0 && b.y * view.k + view.y >= 0 && (b.x + b.w) * view.k + view.x <= size.w && (b.y + b.h) * view.k + view.y <= size.h;
+    const inView = (b) => b.x * view.k + view.x >= 0 && b.y * view.k + view.y >= stage().top && (b.x + b.w) * view.k + view.x <= size.w && (b.y + b.h) * view.k + view.y <= size.h;
     useEffect(() => {
-      if (!pos || !size.w || !world || fitted.current) return;
+      if (!tpos || !size.w || fitted.current) return;
       fitted.current = true;
-      const f = focusAgg.current && frames(conts, W.nodes.filter((n) => pos[n.id]).map((n) => ({ ...n, p: pos[n.id] })), pos).find((x) => x.id === "agg:" + focusAgg.current);
-      focusAgg.current = null;
-      if (f) { const k = Math.min(1, Math.max(0.72, fitView(f, size, 1, 40).k)); tween({ k, x: 40 - f.x * k, y: 40 - f.y * k }); }
-      else setView(shot());
-    }, [pos, size.w]);
+      setView(shot(tpos));
+    }, [tpos, size.w]);
     useEffect(() => {
-      if (!follow || !pos || !size.w || !msgs || !fitted.current) return;
-      const t = shot();
-      const want = { x: -t.x / t.k, y: -t.y / t.k, w: size.w / t.k, h: size.h / t.k };
-      const core = bboxOf([msgs.cbox, ...msgs.roots.map((r) => ({ x: r.p.x, y: r.p.y, w: r.w, h: Math.min(r.h, 200) }))]);
-      if (phase === 0 && inView(core)) return;
-      if (phase === 1 && inView(bboxOf([core, ...msgs.evts]))) return;
-      tween(t, 520 / speed);
-    }, [step, phase, follow, pos && 1]);
+      if (!follow || !tpos || !size.w || !fitted.current) return;
+      const m = msgsFor(tpos);
+      if (m && phase === 0 && inView(bboxOf([m.cbox, ...m.roots.map((r) => ({ x: r.p.x, y: r.p.y, w: r.w, h: Math.min(r.h, 200) }))]))) return;
+      tween(shot(tpos), 700 / speed);
+    }, [tpos, follow, step, phase]);
 
     const centre = hover || sel;
     const focus = useMemo(() => {
@@ -974,18 +1063,20 @@
         if (sx + sw > 0 && sx < size.w && sy + sh > 0 && sy < size.h) continue;
         const cx = sx + sw / 2, cy = sy + sh / 2, dx = cx - size.w / 2, dy = cy - size.h / 2;
         const arrow = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? "→" : "←") : dy > 0 ? "↓" : "↑";
-        const x = Math.max(16, Math.min(size.w - 200, cx - 70)), y = Math.max(56, Math.min(size.h - 110, cy - 14));
+        const x = Math.max(16, Math.min(size.w - 200, cx - 70)), y = Math.max(stage().top + 8, Math.min(size.h - 110, cy - 14));
         out.push({ agg, name: (M.agg(agg) || {}).name || agg, what, arrow, x, y, box });
       }
       return out;
     }, [pos, size, view, step, phase]);
 
     if (!pos) return html`<div className="loading">Laying out the objects…</div>`;
-    const visible = W.nodes.filter((n) => (n.more ? shown.more.get(n.agg) : shown.objs.has(n.id)) && pos[n.id]).map((n) => ({ ...n, p: pos[n.id] }));
-    const open = (agg) => { focusAgg.current = agg; setExpanded(new Set([...expanded, agg])); };
+    const upTo = phase === 0 && step > 0 ? step - 1 : step;
+    const onPage = (k) => W.at.has(k) && W.at.get(k) <= upTo;
+    const visible = W.nodes.filter((n) => shown.objs.has(n.id) && onPage(n.id) && pos[n.id]).map((n) => ({ ...n, p: pos[n.id] }));
+    const open = () => {};
     const linkLayer = html`<g className="edges">${shown.links.map((l, i) => {
       const a = posNode(l.from), b = posNode(l.to);
-      if (!a || !b) return null;
+      if (!a || !b || !onPage(l.from) || !onPage(l.to)) return null;
       const oa = shown.objs.get(l.from);
       const ay = a.p.y + OHEAD + l.row * ROW + ROW / 2 - 1;
       const g = edgePath({ x: a.p.x, y: a.p.y, w: a.w, h: a.h }, ay, { x: b.p.x, y: b.p.y, w: b.w, h: b.h }, b.p.y + 16);
@@ -1027,6 +1118,34 @@
       })}
     </g>`;
 
+    /** Where each note goes: beside its object where it covers nothing, otherwise docked under
+     *  the caption (also when its object is off screen), or flagged when there is no such object. */
+    const notes = (() => {
+      if (!(phase === 1 || frame.start)) return [];
+      const scr = (b) => ({ x: b.x * view.k + view.x, y: b.y * view.k + view.y, w: b.w * view.k, h: b.h * view.k });
+      const taken = visible.map((n) => scr({ x: n.p.x, y: n.p.y, w: n.w, h: n.h }));
+      if (msgs) taken.push(scr(msgs.cbox), ...msgs.evts.map(scr));
+      const t = tellRef.current; if (t) taken.push({ x: t.offsetLeft, y: t.offsetTop, w: t.offsetWidth, h: t.offsetHeight });
+      const hit = (r) => taken.some((o) => r.x < o.x + o.w && o.x < r.x + r.w && r.y < o.y + o.h && o.y < r.y + r.h);
+      const inside = (r) => r.x >= 8 && r.y >= stage().top && r.x + r.w <= size.w - 8 && r.y + r.h <= size.h - 64;
+      const W0 = 270, H0 = 88, G = 18;
+      return (frame.notes || []).map((x, i) => {
+        const n = posNode(x.at);
+        if (!n) return { ...x, i, dock: true };
+        if (!onPage(x.at)) return null;
+        const o = W.per[step].objs.get(x.at);
+        const base = { ...x, i, n, label: o ? objLabel(M, o) : x.at };
+        const b = scr({ x: n.p.x, y: n.p.y, w: n.w, h: Math.min(n.h, 220) });
+        if (b.x > size.w || b.y > size.h || b.x + b.w < 0 || b.y + b.h < 0 || b.y + 20 < stage().top) return { ...base, dock: true };
+        const cands = [];
+        for (let dy = 0; dy <= 2; dy++) cands.push({ side: "r", x: b.x + b.w + G, y: b.y + 6 + dy * (H0 + 10) }, { side: "l", x: b.x - G - W0, y: b.y + 6 + dy * (H0 + 10) });
+        cands.push({ side: "b", x: b.x, y: b.y + b.h + G }, { side: "t", x: b.x, y: b.y - G - H0 });
+        const pick = cands.map((c) => ({ ...c, w: W0, h: H0 })).find((c) => inside(c) && !hit(c));
+        if (!pick) return { ...base, dock: true };
+        taken.push(pick);
+        return { ...base, pin: pick };
+      }).filter(Boolean);
+    })();
     return html`<div className="stage" onPointerOver=${(e) => { const g = e.target.closest && e.target.closest("[data-id]"); setHover(g ? g.getAttribute("data-id") : null); }} onPointerLeave=${() => setHover(null)}>
       <${Canvas} nodes=${visible} conts=${conts} pos=${pos} setPos=${setPos} view=${view} setView=${setView} onSize=${setSize}
         label=${`Object diagram: ${sc.title}, step ${step}`}
@@ -1034,16 +1153,34 @@
         onFrameClick=${(id) => { const f = frames(conts, visible, pos).find((x) => x.id === id); if (f) tween(fitView(f, size, 1.2)); }}
         edgeLayer=${linkLayer} overlay=${overlay} map=${false}
         nodeLayer=${(start) => [
-          ...(phase === 1 ? diff.gone.map((k) => { const n = posNode(k); return n && html`<${ObjNode} key=${"gone:" + k} o=${before.objs.get(k)} n=${n} M=${M} state="gone" start=${start} />`; }) : []),
+          ...(phase === 1 ? diff.gone.filter(onPage).map((k) => { const n = posNode(k); return n && html`<${ObjNode} key=${"gone:" + k} o=${before.objs.get(k)} n=${n} M=${M} state="gone" start=${start} />`; }) : []),
           ...visible.map((n) => {
             if (n.more) return html`<${MoreNode} key=${n.id} n=${n} count=${shown.more.get(n.agg)} M=${M} start=${start} open=${() => open(n.agg)} />`;
             const o = shown.objs.get(n.id);
-            const st = phase === 1 && diff.born.has(n.id) ? "born" : phase === 1 && diff.changed.has(n.id) ? "changed" : focus && !focus.has(n.id) ? "dim" : "";
-            return html`<${ObjNode} key=${n.id} o=${o} n=${n} M=${M} sel=${sel === n.id} state=${st} start=${start}
+            const entering = phase === 1 && W.at.get(n.id) === step && step > 0;
+            const st = (phase === 1 && diff.born.has(n.id) ? "born" : phase === 1 && diff.changed.has(n.id) ? "changed" : focus && !focus.has(n.id) ? "dim" : "") + (entering ? " enter" : "");
+            // a new object fades in once the others have made room for it
+            const glides = layouts && step > 0 && layouts[step] !== layouts[step - 1];
+            return html`<${ObjNode} key=${n.id} o=${o} n=${n} M=${M} sel=${sel === n.id} state=${st} start=${start} delay=${entering && glides ? Math.round(620 / speed) : 0}
               changedRows=${phase === 1 ? diff.changed.get(n.id) : null} prevRows=${diff.was.get(n.id)} />`;
           })]} />
-      <${ZoomBar} setView=${setView} size=${size} fit=${() => tween(fitView(bboxOf([world, msgs && msgs.cbox, ...(msgs ? msgs.evts : [])]), size, 1))} tidy=${() => { forget(key); relayout(); }} />
-      <${WorldFacts} sc=${sc} step=${step} className="on-canvas" />
+      <${ZoomBar} setView=${setView} size=${size} fit=${() => tween(fitView(bboxOf([world, msgs && msgs.cbox, ...(msgs ? msgs.evts : [])]), size, 1))} tidy=${() => relayout()} />
+      <div className="tell" ref=${tellRef}>
+        <${WorldFacts} sc=${sc} step=${step} />
+        <div className="caption" key=${sc.id + ":" + step}>
+          <div className="cap-head">${frame.start ? sc.title : html`<span className="n">${step}</span>${frame.note}`}</div>
+          ${(frame.say || (frame.start ? sc.doc : "")) && html`<${Doc} text=${frame.say || sc.doc} className="cap-say" />`}
+          ${frame.start && !visible.length && !playing && html`<p className="cap-hint">Press → to start, or Play.</p>`}
+          ${playing && step < sc.frames.length - 1 && html`<div className="cap-timer" key=${"t" + step} style=${{ animationDuration: dwell(frame) / speed + "ms" }} />`}
+        </div>
+        ${notes.filter((x) => x.dock).map((x) => x.n
+          ? html`<button key=${"dock" + x.i} className="callout docked" style=${{ "--h": M.hue(x.n.agg), animationDelay: (180 + x.i * 140) / speed + "ms" }}
+              onClick=${() => { const b = { x: x.n.p.x, y: x.n.p.y, w: x.n.w + 300, h: Math.min(x.n.h, 320) }; const f = fitIn(b, 1, 48); tween({ ...f, k: Math.max(0.72, f.k) }); }}>
+              <span className="dock-at">↗ ${x.label}</span><${Doc} text=${x.text} className="callout-text" /></button>`
+          : html`<div key=${"miss" + x.i} className="callout docked missing"><span className="dock-at">⚠ No object "${x.at}" at this step</span><${Doc} text=${x.text} className="callout-text" /></div>`)}
+      </div>
+      ${notes.filter((x) => x.pin).map((x) => html`<div key=${"note" + x.i} className=${"callout " + x.pin.side} style=${{ left: x.pin.x + "px", top: x.pin.y + "px", "--h": M.hue(x.n.agg), animationDelay: (180 + x.i * 140) / speed + "ms" }}>
+            <${Doc} text=${x.text} className="callout-text" /></div>`)}
       ${offscreen.map((h) => html`<button key=${h.agg} className="offscreen" style=${{ left: h.x + "px", top: h.y + "px", "--h": M.hue(h.agg) }}
           onClick=${() => tween({ ...fitView(h.box, size, 1, 56), k: Math.max(0.72, Math.min(1, fitView(h.box, size, 1, 56).k)) })}
           aria-label=${`Show ${h.name}, off screen`}><span className="arrow">${h.arrow}</span> ${h.name}${h.what ? html`<span className="what"> · ${h.what}</span>` : null}</button>`)}
@@ -1163,7 +1300,8 @@
   const frame0 = (f) => (f.via ? `Running ${f.via} across ${f.targets.length} aggregates…` : "The aggregate checks its rules…");
   function StepPanel({ M, sc, step, phase, go, sel }) {
     const f = sc.frames[step];
-    const [cur, before] = useMemo(() => [objectsOf(M, f), step > 0 ? objectsOf(M, sc.frames[step - 1]) : null], [sc, step]);
+    const [cur, before] = useMemo(() => f ? [objectsOf(M, f), step > 0 ? objectsOf(M, sc.frames[step - 1]) : null] : [null, null], [sc, step]);
+    if (!f) return null;
     const changes = [];
     if (before) {
       for (const [k, o] of cur.objs) {
@@ -1181,8 +1319,9 @@
       <h2>${sc.title}</h2>
       ${step === 0 && html`<${Doc} text=${sc.doc} />`}
       <p className="note">${f.note}</p>
+      ${f.say && html`<${Doc} text=${f.say} className="say" />`}
       <${WorldFacts} sc=${sc} step=${step} />
-      ${f.start && html`<p className="doc">These objects are the state the scenario starts from. Press → to send the first command.</p>`}
+      ${f.start && !f.say && html`<p className="doc">Press → to send the first command.</p>`}
       ${!f.start && f.actor !== "clock" && html`
         <div className="who"><span className="badge">${f.actor || "system"}</span><span className="arrow">${f.via ? "runs the process" : "sends"}</span>
           <code>${f.via || (cmd && cmd.name)}</code><span className="arrow">to</span>
@@ -1216,6 +1355,12 @@
     </div>`;
   }
 
+  /** How long playback stays on a step: time to take in the diagram, plus time to read what the
+   *  step says and its notes at about 240 words a minute. */
+  function dwell(f) {
+    const words = [f.say || f.note || "", ...(f.notes || []).map((n) => n.text)].join(" ").split(/\s+/).filter(Boolean).length;
+    return 2500 + words * 250;
+  }
   function Timeline({ sc, step, setStep, playing, setPlaying, speed, setSpeed, follow, setFollow }) {
     const n = sc.frames.length;
     return html`<div className="timeline">
@@ -1294,7 +1439,7 @@
     useEffect(() => {
       if (!playing || !sc) return;
       if (step >= sc.frames.length - 1) { setPlaying(false); return; }
-      const t = setTimeout(() => setStep(step + 1), 2800 / speed);
+      const t = setTimeout(() => setStep(step + 1), dwell(sc.frames[step]) / speed);
       return () => clearTimeout(t);
     }, [playing, step, sc && sc.id, speed]);
     useEffect(() => {
@@ -1323,7 +1468,7 @@
       </header>
       <div className="main">
         ${!ready ? html`<div className="loading">Loading…</div>` : sc
-          ? html`<${ObjectView} key=${sc.id} M=${M} sc=${sc} step=${step} phase=${phase} sel=${objSel} setSel=${(k) => { setObjSel(k); if (k) setAside(true); }} speed=${speed} follow=${follow} />`
+          ? html`<${ObjectView} key=${sc.id} M=${M} sc=${sc} step=${step} phase=${phase} playing=${playing} sel=${objSel} setSel=${(k) => { setObjSel(k); if (k) setAside(true); }} speed=${speed} follow=${follow} />`
           : html`<${ClassView} M=${M} sel=${route.sel} setSel=${(id) => nav({ tab: "model", sel: id })} layers=${layers} />`}
         ${aside && html`<aside className="aside"><div className="aside-inner">
           ${sc ? html`<${StepPanel} M=${M} sc=${sc} step=${step} phase=${phase} go=${go} sel=${objSel} />`
