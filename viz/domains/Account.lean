@@ -37,18 +37,23 @@ story limits "limits" "Deposits, a limit, an overdraft"
   from ([] : World) using snap
   says: "A blank page: no account exists until the first deposit opens one."
   | beat "Open the account with $120" (.deposit 120)
+    expect: accepted "deposited"
     says: "The customer deposits $120. That first deposit is what brings the account into being."
     note: "account" "The balance is everything deposited minus everything withdrawn: $120."
   | beat "Take out $50" (.withdraw 50)
+    expect: accepted "withdrew"
     says: "A $50 withdrawal is under the $100 daily limit and within the balance, so it goes through."
     note: "account" "$120 − $50 = $70 left."
   | beat "Take out $200" (.withdraw 200)
+    expect: blocked "withdrawal-limit"
     says: "$200 is over the daily limit. The bank's policy stops it before the account is even asked; only an administrator could let it through."
     note: "account" "Unchanged: a refused command records nothing."
   | beat "Take out $90" (.withdraw 90)
+    expect: refused "insufficientFunds"
     says: "$90 is within the limit, so policy allows it. But only $70 is left, and the account itself refuses to go below zero."
     note: "account" "Policy and the account check different things: the limit is the bank's rule, never going negative is the account's own."
   | beat "Take out the $70 that is left" (.withdraw 70)
+    expect: accepted "withdrew"
     says: "Taking out exactly what is left is fine."
     note: "account" "Empty, never negative. Lean proves no sequence of commands can make it negative."
 

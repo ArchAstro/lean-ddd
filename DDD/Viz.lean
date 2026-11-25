@@ -83,6 +83,37 @@ def Finding.say (f : Finding) : String :=
   | .overridden a r => s!"{f.rule}: overridden by the {match a with | .administrator => "administrator" | .counsel => "counsel"}{if r.isEmpty then "" else s!" ({r})"}"
   | .missingFact x => s!"{f.rule}: could not be checked, {x} is unknown"
 
+/-- The constructor a value was built with, from its `Repr`: `Ns.Evt.deposited 120` gives
+`deposited`. -/
+def ctorName (s : String) : String :=
+  let cs := (s.toList.dropWhile (fun c => c.isWhitespace || c == '(')).takeWhile
+    (fun c => !c.isWhitespace && c != '(' && c != ')')
+  (String.ofList cs |>.splitOn ".").getLast?.getD ""
+
+/-- What a step did, in the terms a story's `expect:` names. -/
+inductive Result where
+  /-- Accepted: the constructors of the events recorded, in order, and the rules that warned. -/
+  | accepted (events : List String) (warned : List String)
+  /-- Built on an out-of-date version of the aggregate. -/
+  | stale
+  /-- Policy stopped it: rules that block until overridden, facts nobody has set. -/
+  | blocked (rules : List String) (facts : List String)
+  /-- The aggregate refused it: the constructor of its reason, or `""` if it gives none. -/
+  | refused (reason : String)
+  deriving Repr, BEq, Inhabited
+
+private def names (xs : List String) : String := ", ".intercalate xs
+
+def Result.say : Result → String
+  | .accepted [] [] => "accepted, recording nothing"
+  | .accepted es ws => s!"accepted{if es.isEmpty then ", recording nothing" else s!", recording {names es}"}{if ws.isEmpty then "" else s!", with warnings from {names ws}"}"
+  | .stale => "rejected as stale"
+  | .blocked rs [] => s!"blocked by {names rs}"
+  | .blocked [] fs => s!"held until {names fs} is set"
+  | .blocked rs fs => s!"blocked by {names rs} and held until {names fs} is set"
+  | .refused "" => "refused"
+  | .refused r => s!"refused: {r}"
+
 structure Outcome where
   ok : Bool
   error : String := ""
@@ -90,6 +121,54 @@ structure Outcome where
   /-- What policy noted about an accepted command: rules it broke that only warn, overrides,
   facts it could not check. -/
   findings : List String := []
+  /-- The rules behind `findings`. -/
+  warned : List String := []
+  /-- What happened, for checking against what the story says. -/
+  result : Result := if ok then .accepted (events.map ctorName) warned else .refused ""
+
+/-- What a story says a step does. A step must say it, and the build fails when the step
+does something else. -/
+inductive Expect where
+  /-- Accepted, recording exactly these events (constructor names, in order) and warned by
+  exactly these rules. -/
+  | accepted (events : List String) (warned : List String)
+  /-- Refused by the aggregate, for this reason (constructor name). `none` only where the
+  step gives no reason, such as a process that wrote nothing. -/
+  | refused (reason : Option String)
+  /-- Stopped by these policy rules. -/
+  | blocked (rules : List String)
+  /-- Held by policy until these facts are set. -/
+  | needs (facts : List String)
+  | stale
+  deriving Repr, BEq, Inhabited
+
+def Expect.matches : Expect → Result → Bool
+  | .accepted es ws, .accepted es' ws' => es == es' && ws == ws'
+  | .refused none, .refused r => r == ""
+  | .refused (some r), .refused r' => r == r'
+  | .blocked rs, .blocked rs' [] => rs == rs'
+  | .needs fs, .blocked [] fs' => fs == fs'
+  | .stale, .stale => true
+  | _, _ => false
+
+def Expect.say : Expect → String
+  | .accepted es ws => Result.say (.accepted es ws)
+  | .refused none => "refused"
+  | .refused (some r) => s!"refused: {r}"
+  | .blocked rs => s!"blocked by {names rs}"
+  | .needs fs => s!"held until {names fs} is set"
+  | .stale => "rejected as stale"
+
+/-- How to write what actually happened as an `expect:` line, for the error message. -/
+def Result.expectLine : Result → String
+  | .accepted es ws =>
+    let q (xs : List String) := ", ".intercalate (xs.map (s!"\"{·}\""))
+    s!"expect: accepted{if es.isEmpty then "" else " " ++ q es}{if ws.isEmpty then "" else " warns " ++ q ws}"
+  | .stale => "expect: stale"
+  | .blocked rs [] => s!"expect: blocked {", ".intercalate (rs.map (s!"\"{·}\""))}"
+  | .blocked _ fs => s!"expect: needs {", ".intercalate (fs.map (s!"\"{·}\""))}"
+  | .refused "" => "expect: refused"
+  | .refused r => s!"expect: refused \"{r}\""
 
 /-- What a person reads at one step of a story: what is happening, in words, and notes
 pinned to particular objects. -/
@@ -102,6 +181,8 @@ structure Telling where
   /-- Objects to bring onto the page at this step though the step does not change them:
   the people involved, say. Same keys as `notes`. -/
   reveal : List String := []
+  /-- What the step does, from `expect:`. A story step must have exactly one. -/
+  expect : List Expect := []
 
 /-- One step of a scenario: who does what to which aggregates, and how to run it. -/
 structure Beat (W : Type) where
@@ -114,21 +195,36 @@ structure Beat (W : Type) where
   targets : List String
   command : String
   run : W → W × Outcome
+  /-- The world after each event of the step but the last, when it records several, so the
+  viewer can show which event changed what. -/
+  stages : W → List W := fun _ => []
 
 structure Scenario where
   id : String
   title : String
   doc : String := ""
   frames : Json
+  /-- What is wrong with the scenario: a step that does something other than what the story
+  says, a note about an object that is not there. `story` fails the build on any. -/
+  problems : List String := []
 
 private def tellingJson (t : Telling) : List (String × Json) :=
   [("say", toJson t.say),
    ("notes", Json.arr (t.notes.map fun (at_, text) => Json.mkObj [("at", toJson at_), ("text", toJson text)]).toArray),
-   ("reveal", toJson t.reveal)]
+   ("reveal", toJson t.reveal), ("expect", toJson (t.expect.map (·.say)))]
 
 /-- The events appended to a log, as text. -/
 def newEvents {E : Type} [Repr E] (before after : List E) : List String :=
   (after.drop before.length).map (fun e => reprStr e)
+
+/-- A rejection, as what a story's `expect:` names. A process that runs commands itself can
+use it to say why it was refused. -/
+def _root_.DDD.Rejection.result {X : Type} [Repr X] : Rejection X → Result
+  | .stale _ _ => .stale
+  | .policy v => .blocked
+      (v.dispositions.filterMap fun | .blocked r _ => some r | _ => none)
+      (v.dispositions.filterMap fun | .needsFact _ f => some f | _ => none)
+  | .impossible x => .refused (ctorName (reprStr x))
 
 /-- A beat that sends one command to one aggregate through the command path. Pass the
 command, event and rejection types by name (`(C := Cmd) (E := Evt) (X := Why)`) so their
@@ -144,8 +240,55 @@ def submitBeat {W Ctx S C E X : Type} [Repr C] [Repr E] [Repr X]
   run w :=
     let log := get w
     match submit agg (rules w) .enforcing [] (ctx w) log log.length c with
-    | .ok (log', fs) => (set w log', { ok := true, events := newEvents log log', findings := fs.map Finding.say })
-    | .error why => (w, { ok := false, error := reprStr why })
+    | .ok (log', fs) => (set w log',
+        { ok := true, events := newEvents log log', findings := fs.map Finding.say,
+          warned := (fs.map (·.rule)).eraseDups })
+    | .error why => (w, { ok := false, error := reprStr why, result := why.result })
+  stages w :=
+    let log := get w
+    match submit agg (rules w) .enforcing [] (ctx w) log log.length c with
+    | .ok (log', _) =>
+      let new := log'.drop log.length
+      (List.range (new.length - 1)).map fun i => set w (log ++ new.take (i + 1))
+    | .error _ => []
+
+/-- How the viewer writes an id in an object's key: a string or number as is, a one-field
+identifier (`{"raw": "ana"}`) as its value. -/
+def idText : Json → String
+  | .str s => s
+  | .num n => toString n
+  | .obj kvs => match kvs.toList with
+    | [(k, .str s)] => if k == "raw" || k == "code" then s else (Json.obj kvs).compress
+    | [(k, .num n)] => if k == "raw" || k == "code" then toString n else (Json.obj kvs).compress
+    | _ => (Json.obj kvs).compress
+  | j => j.compress
+
+/-- Whether a snapshot holds the object a note or `show:` names: an aggregate id, then
+`/field`, `/field#id` or `/field[i]` steps into it, as the viewer keys objects. -/
+def objectAt (state : Json) (key : String) : Bool :=
+  match key.splitOn "/" with
+  | [] => false
+  | agg :: path =>
+    match state.getObjVal? agg with
+    | .error _ => false
+    | .ok a =>
+      if a.getObjValD "exists" == .bool false then false else
+      let step (cur : Option Json) (seg : String) : Option Json := do
+        let c ← cur
+        match seg.splitOn "#" with
+        | [f, id] =>
+          let .arr xs := c.getObjValD f | none
+          xs.find? (fun x => idText (x.getObjValD "id") == id)
+        | _ =>
+          match seg.splitOn "[" with
+          | [f, ix] =>
+            let .arr xs := c.getObjValD f | none
+            let n ← (ix.dropEnd 1).toString.toNat?
+            xs[n]?
+          | _ => match c.getObjValD seg with
+            | .null => none
+            | v => some v
+      (path.foldl step (some (a.getObjValD "raw"))).isSome
 
 /-- Run beats in order. Frame 0 is the starting state; each later frame is one beat, with
 every aggregate's snapshot after it.
@@ -158,9 +301,10 @@ A snapshot is an object per aggregate id:
 
 An entry named `@world` is not an aggregate: it is an object of facts about the world the
 scenario runs in, such as today's date, and the viewer shows it on every step. -/
-def play {W : Type} (snap : W → List (String × Json)) (w₀ : W) (beats : List (Beat W))
-    (opening : Telling := {}) : Json :=
+def playChecked {W : Type} (snap : W → List (String × Json)) (w₀ : W) (beats : List (Beat W))
+    (opening : Telling := {}) (checked : Bool := false) : Json × List String :=
   let frame (w : W) (b : Option (Beat W)) (o : Outcome) : Json :=
+    let stages := ((b.map (·.stages w)).getD []).map fun w => Json.mkObj (snap w)
     Json.mkObj <| tellingJson ((b.map (·.telling)).getD opening) ++ [
       ("note", toJson ((b.map (·.note)).getD "The starting state")),
       ("actor", toJson ((b.map (·.actor)).getD "")),
@@ -168,13 +312,31 @@ def play {W : Type} (snap : W → List (String × Json)) (w₀ : W) (beats : Lis
       ("targets", toJson ((b.map (·.targets)).getD [])),
       ("command", toJson ((b.map (·.command)).getD "")),
       ("ok", toJson o.ok), ("error", toJson o.error), ("events", toJson o.events),
-      ("findings", toJson o.findings),
+      ("findings", toJson o.findings), ("result", toJson o.result.say),
       ("start", toJson b.isNone),
-      ("state", Json.mkObj (snap w))]
-  let (_, frames) := beats.foldl (fun (w, acc) b =>
+      ("state", Json.mkObj (snap w))] ++ (if stages.isEmpty then [] else [("stages", Json.arr stages.toArray)])
+  let keyProblems (where_ : String) (t : Telling) (w : W) : List String :=
+    let st := Json.mkObj (snap w)
+    (t.notes.map (·.1) ++ t.reveal).filterMap fun k =>
+      if objectAt st k then none
+      else some s!"{where_}: there is no object \"{k}\" on the page to note or show"
+  let (_, frames, problems, _) := beats.foldl (fun (w, acc, ps, i) b =>
     let (w', o) := b.run w
-    (w', acc ++ [frame w' (some b) o])) (w₀, [frame w₀ none { ok := true }])
-  Json.arr frames.toArray
+    let here := s!"step {i} (\"{b.note}\")"
+    let expectPs := if !checked then [] else match b.telling.expect with
+      | [] => [s!"{here}: say what it does with `expect:`; it was {o.result.say}. Write: {o.result.expectLine}"]
+      | [e] => if e.matches o.result then []
+        else [s!"{here}: the story says it is {e.say}, but it was {o.result.say}. If the story is wrong, write: {o.result.expectLine}"]
+      | _ => [s!"{here}: has more than one `expect:`"]
+    let sayPs := if checked && b.telling.say.isEmpty then [s!"{here}: has no `says:`; tell a reader what is happening"] else []
+    (w', acc ++ [frame w' (some b) o], ps ++ expectPs ++ sayPs ++ keyProblems here b.telling w', i + 1))
+    (w₀, [frame w₀ none { ok := true }], keyProblems "the opening" opening w₀ ++
+      (if opening.expect.isEmpty then [] else ["the opening: `expect:` belongs to a step, not the opening"]), 1)
+  (Json.arr frames.toArray, problems)
+
+def play {W : Type} (snap : W → List (String × Json)) (w₀ : W) (beats : List (Beat W))
+    (opening : Telling := {}) : Json :=
+  (playChecked snap w₀ beats opening).1
 
 /-! ## Stories: scenarios written to be read
 
@@ -188,19 +350,34 @@ story limits "limits" "Deposits, a limit, an overdraft"
   from ([] : World) using snap
   says: "A blank page: no account exists until the first deposit opens one."
   | beat "Open the account with $120" (.deposit 120)
+    expect: accepted "deposited"
     says: "The customer deposits $120. That first deposit brings the account into being."
     note: "account" "The balance is everything deposited minus everything withdrawn."
   | beat "Take out $200" (.withdraw 200)
+    expect: blocked "withdrawal-limit"
     says: "$200 is over the daily limit, so policy stops it."
 ```
 
 (`viz/domains/Account.lean` is the whole example.)
 
-- `says:` what is happening, in plain words. Several join into paragraphs.
+- `expect:` what the step does. Every step has exactly one, and the build fails when the
+  domain does something else:
+  - `accepted "event", …` recorded exactly these events (constructor names, in order; none:
+    it recorded nothing), optionally `warns "rule", …` for the policy rules that warned;
+  - `refused "reason"` the aggregate refused it, with this reason (constructor name);
+    `refused` alone only for a step that gives no reason;
+  - `blocked "rule", …` policy stopped it; `needs "fact", …` policy is waiting on a fact;
+  - `stale` it was built on an out-of-date version.
+- `says:` what is happening, in plain words. Every step needs one; several join into paragraphs.
 - `note: "key" "text"` a note pinned to one object. A key is an aggregate id, or an object
   inside one: `aggregate/field#id`, or `aggregate/field[i]` for one with no id.
 - `show: "key", …` brings objects onto the page that the step does not change.
 - Lines before the first `|` describe the opening page.
+
+A note or `show:` must name an object that is on the page after its step, or the build fails.
+The error says what the step really did, and the `expect:` line that would say so: a story
+can be wrong, but it cannot be wrong quietly. `Examples/Stories.lean` shows each mistake and
+the message it gives.
 
 It defines `limits : Scenario`, for `emit`. -/
 
@@ -209,24 +386,44 @@ inductive StoryLine where
   | says (text : String)
   | note (at_ text : String)
   | show (keys : List String)
+  | expect (e : Expect)
 
 /-- A step's lines, gathered into what is told. -/
 def Telling.of (ls : List StoryLine) : Telling := ls.foldl (fun t l => match l with
   | .says x => { t with say := if t.say.isEmpty then x else t.say ++ "\n\n" ++ x }
   | .note a x => { t with notes := t.notes ++ [(a, x)] }
-  | .show ks => { t with reveal := t.reveal ++ ks }) {}
+  | .show ks => { t with reveal := t.reveal ++ ks }
+  | .expect e => { t with expect := t.expect ++ [e] }) {}
 
 /-- A scenario from a story: its opening lines and its steps, each a beat with what it tells. -/
 def tell {W : Type} (id title doc : String) (snap : W → List (String × Json)) (w₀ : W)
     (opening : List StoryLine) (steps : List (Beat W × List StoryLine)) : Scenario :=
-  { id, title, doc,
-    frames := play snap w₀ (steps.map fun (b, ls) => { b with telling := Telling.of ls })
-      (Telling.of opening) }
+  let (frames, problems) := playChecked snap w₀
+    (steps.map fun (b, ls) => { b with telling := Telling.of ls }) (Telling.of opening) (checked := true)
+  { id, title, doc, frames, problems }
+
+/-- Fail with every problem in a scenario. `story` runs this on what it defines, and `emit`
+on every scenario it writes, so a story that says one thing while the domain does another
+does not build. -/
+def Scenario.check (s : Scenario) : CommandElabM Unit := do
+  unless s.problems.isEmpty do
+    throwError m!"story \"{s.id}\" does not match the domain ({s.problems.length} problems):\n" ++
+      "\n".intercalate (s.problems.map ("  • " ++ ·))
 
 declare_syntax_cat storyLine
 syntax "says: " str : storyLine
 syntax "note: " str str : storyLine
 syntax "show: " str,+ : storyLine
+
+/-- What a step does. `accepted "e", …` lists the events it records (constructor names, in
+order; none: it records nothing), `warns "rule", …` the policy rules that warn. -/
+declare_syntax_cat storyExpect (behavior := both)
+syntax &"accepted" (str,+)? (&"warns" str,+)? : storyExpect
+syntax &"refused" (str)? : storyExpect
+syntax &"blocked" str,+ : storyExpect
+syntax &"needs" str,+ : storyExpect
+syntax &"stale" : storyExpect
+syntax "expect: " storyExpect : storyLine
 
 declare_syntax_cat storyStep
 syntax "| " term (ppLine storyLine)* : storyStep
@@ -239,6 +436,15 @@ macro_rules
   | `(story_line% says: $t:str) => `(StoryLine.says $t)
   | `(story_line% note: $a:str $t:str) => `(StoryLine.note $a $t)
   | `(story_line% show: $ks:str,*) => `(StoryLine.show [$ks,*])
+  | `(story_line% expect: accepted $[$es:str,*]? $[warns $ws:str,*]?) =>
+    let es := es.map (·.getElems) |>.getD #[]
+    let ws := ws.map (·.getElems) |>.getD #[]
+    `(StoryLine.expect (Expect.accepted [$es,*] [$ws,*]))
+  | `(story_line% expect: refused $r:str) => `(StoryLine.expect (Expect.refused (some $r)))
+  | `(story_line% expect: refused) => `(StoryLine.expect (Expect.refused none))
+  | `(story_line% expect: blocked $rs:str,*) => `(StoryLine.expect (Expect.blocked [$rs,*]))
+  | `(story_line% expect: needs $fs:str,*) => `(StoryLine.expect (Expect.needs [$fs,*]))
+  | `(story_line% expect: stale) => `(StoryLine.expect Expect.stale)
 
 syntax "story_step% " storyStep : term
 macro_rules
@@ -249,7 +455,8 @@ macro_rules
       $ls:storyLine* $steps:storyStep*) => do
     let about : TSyntax `str := ab.getD (Syntax.mkStrLit "")
     `($[$doc:docComment]? def $n : Scenario :=
-        tell $id $title $about $snap $w [$[story_line% $ls],*] [$[story_step% $steps],*])
+        tell $id $title $about $snap $w [$[story_line% $ls],*] [$[story_step% $steps],*]
+      #eval Scenario.check $n)
 
 /-! ## Reading the environment -/
 
@@ -524,6 +731,7 @@ Call it from a script with `#eval emit spec scenarios`; `lake exe ddd-viz` runs 
 script. Warns about terms with no doc comment (see `glossaryGaps`). -/
 def emit (spec : Spec) (scenarios : List Scenario) (dir : System.FilePath := "site") :
     CommandElabM Unit := do
+  for s in scenarios do s.check
   let d ← liftTermElabM (data spec scenarios)
   IO.FS.createDirAll (dir / "data")
   IO.FS.writeFile (dir / "data" / s!"{spec.id}.json") d.compress

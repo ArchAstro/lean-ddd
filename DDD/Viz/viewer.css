@@ -376,3 +376,45 @@ svg.canvas.dragging { cursor: grabbing; }
 .cap-timer { position: absolute; left: 0; bottom: 0; height: 3px; width: 100%; background: var(--focus); opacity: .55; transform-origin: left; animation: captimer linear both; }
 @keyframes captimer { from { transform: scaleX(0); } to { transform: scaleX(1); } }
 .node.obj.born, .node.obj.enter { animation-delay: var(--d, 0ms); }
+
+/* what came before, faded in the lane above the command; and what each event changed */
+.past-card { cursor: pointer; opacity: .42; transition: opacity .15s; }
+.past-card:hover, .past-card:focus-visible { opacity: 1; outline: none; }
+.past-card:focus-visible .n-body { stroke: var(--focus); stroke-width: 2; }
+.past-card .n-body { fill: var(--surface); stroke: color-mix(in oklab, var(--focus) 55%, var(--line)); stroke-width: 1.2; }
+.past-card.refused .n-body { stroke: color-mix(in oklab, var(--bad) 60%, var(--line)); }
+.past-card.clock .n-body { stroke: var(--line); stroke-dasharray: 3 3; }
+.past-head { font: 600 12.5px var(--sans); fill: var(--ink); }
+.past-n { fill: var(--muted); font-variant-numeric: tabular-nums; }
+.past-mark { fill: var(--ok); }
+.past-card.refused .past-mark { fill: var(--bad); }
+.past-ev { font: 12px var(--mono); fill: var(--muted); }
+.past-more { font: 12px var(--sans); fill: var(--faint); }
+.m-flow { fill: none; stroke: color-mix(in oklab, var(--h, var(--ok)) 75%, var(--ok)); stroke-width: 1.6; stroke-dasharray: 1; stroke-dashoffset: 1; animation: draw .5s ease-out forwards; }
+.m-flow.still { stroke-dashoffset: 0; animation: none; stroke: var(--ok); }
+.m-flow:hover { stroke-width: 3; }
+.mk-flow { fill: var(--ok); }
+@media (prefers-reduced-motion: reduce) { .m-flow { animation: none; stroke-dashoffset: 0; } }
+
+/* the selected object: its values, expandable, and its history */
+.vt-wrap { margin: 2px 0 4px; }
+.vt summary { cursor: pointer; font: 12.5px var(--mono); color: var(--code); list-style: revert; }
+.vt-sum { color: var(--muted); }
+.vt dl { margin: 2px 0 2px 14px; padding-left: 8px; border-left: 1px solid var(--line); }
+.vt-row { display: flex; gap: 8px; font: 12.5px var(--mono); line-height: 1.55; }
+.vt-row dt { color: var(--muted); min-width: 4ch; }
+.vt-row dd { margin: 0; color: var(--code); word-break: break-word; }
+.vt-leaf { font: 12.5px var(--mono); color: var(--code); }
+.history { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 6px; }
+.history li { display: flex; gap: 10px; align-items: flex-start; }
+.history li.later { opacity: .5; }
+.history li.cur .h-step { background: var(--focus); color: var(--surface); border-color: var(--focus); }
+.h-step { flex: none; min-width: 28px; height: 24px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); font: 600 12.5px var(--sans); font-variant-numeric: tabular-nums; cursor: pointer; }
+.h-step:hover { border-color: var(--focus); }
+.h-step:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.h-what { font-size: 13.5px; color: var(--ink); }
+.h-what code { font-size: 12.5px; }
+.h-chg { font: 12.5px var(--mono); color: var(--muted); word-break: break-word; }
+.h-chg .name { color: var(--ink); }
+.h-chg .was { text-decoration: line-through; text-decoration-color: color-mix(in oklab, var(--bad) 60%, transparent); }
+.checked { font-size: 12.5px; color: var(--ok); margin: 6px 0 0; }

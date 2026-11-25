@@ -175,6 +175,10 @@ Each page has two views:
    - Each object shows its field values, leaving out fields that stay empty throughout. Lines show what each object contains and the entities it refers to by id.
    - An object's identity comes from its `id`, or else its role in its parent (`payments[1] : Payment`).
    - The command arrives next to the aggregate it targets and is accepted ✓ or refused ✕, with the reason in words. New objects are outlined in green, changed rows are marked in amber, and events appear under the command.
+   - An arrow runs from each event to the objects and rows it created or changed. With several events in one step, the step's state after each event says exactly which one did what.
+   - Earlier commands stay in the lane above the current one, faded, with the events they recorded. Click one to go back to that step.
+   - Select an object to inspect it: every field's value now, with records and lists opening as a tree, and its history: each step that created or changed it, the event that did, and each field's old and new value. Click a step to go there.
+   - The side panel says what the story claimed the step does, which the build has checked.
 
 A domain script names declarations; everything else is read from Lean (`viz/domains/Account.lean` is a complete one):
 
@@ -198,9 +202,11 @@ story happy "happy" "An order, paid"
   from world₀ using snap
   says: "Nothing exists yet."
   | place "Alice places an order" (.place "o-1" "book")
+    expect: accepted "placed"
     says: "Alice orders a book. Placing it is what creates the order."
     note: "order" "Status: placed. Nothing is owed until it's confirmed."
   | place "Alice pays" (.pay "o-1")
+    expect: accepted "paid"
     says: "She pays, and the order is done."
     note: "order/payments[0]" "The payment, kept with the order."
 
@@ -208,10 +214,12 @@ story happy "happy" "An order, paid"
 ```
 
 - `story` defines a `Scenario`. Each `|` step is a beat, followed by what to tell at that step:
-  - `says: "…"` what is happening and why it matters, for someone new to the domain. Markdown.
+  - `expect: …` what the step does; exactly one per step. `accepted "event", …` (the events it records, in order; `warns "rule", …` for policy warnings), `refused "reason"`, `blocked "rule", …`, `needs "fact", …` or `stale`.
+  - `says: "…"` what is happening and why it matters, for someone new to the domain. Markdown. Every step needs one.
   - `note: "key" "…"` a note pinned to one object. A key is an aggregate id (`"order"`), or an object inside one: `aggregate/field#id`, or `aggregate/field[i]` when it has no id. It can go deeper (`order/items#3/discount`).
   - `show: "key", …` brings objects onto the page that the step does not change.
   - Lines before the first `|` tell the opening, blank page.
+  - **A story can't be wrong quietly.** `story` runs every step, and the build fails if a step does something other than its `expect:` says, has no `expect:` or `says:`, or has a note or `show:` naming an object that isn't there. The error gives what the step really did and the `expect:` line that would say so. `Examples/Stories.lean` has each mistake and its message.
 
 - `submitBeat` sends one command through `submit`, with the domain's rules and context.
 - A hand-built `Beat` can run a process (set `via`) or advance a clock.

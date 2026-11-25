@@ -461,7 +461,7 @@
       <defs>
         <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse" patternTransform=${`translate(${view.x} ${view.y}) scale(${view.k})`}><circle className="grid-dot" cx="1" cy="1" r="1" /></pattern>
         <marker id="end-extends" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="13" markerHeight="13" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1,1 L11,6 L1,11 z" className="mk mk-extends" /></marker>
-        ${["has", "ref", "uses", "msg", "proc", "arg", "identifies", "refuse", "cmd", "evt", "link"].map((k) => html`<marker key=${k} id=${"end-" + k} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+        ${["has", "ref", "uses", "msg", "proc", "arg", "identifies", "refuse", "cmd", "evt", "link", "flow"].map((k) => html`<marker key=${k} id=${"end-" + k} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
           ${k === "ref" || k === "identifies" || k === "link" ? html`<path d="M1,1 L9,5 L1,9" className=${"mk mk-open mk-" + k} />` : html`<path d="M0,0 L10,5 L0,10 z" className=${"mk mk-" + k} />`}</marker>`)}
         <marker id="start-has" viewBox="0 0 16 10" refX="1" refY="5" markerWidth="15" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1,5 L8,1 L15,5 L8,9 z" className="mk mk-has" /></marker>
       </defs>
@@ -723,7 +723,7 @@
             links.push({ from: key, row: o.rows.length, to: ck, kind: "has" });
             return ck;
           });
-          o.rows.push({ name: f.name, doc: f.doc, text: g.many ? (keys.length ? `◆ ${plural(keys.length, tt.name)}` : "[]") : val == null ? "—" : `◆ ${tt.name}`, children: keys });
+          o.rows.push({ name: f.name, doc: f.doc, raw: val, text: g.many ? (keys.length ? `◆ ${plural(keys.length, tt.name)}` : "[]") : val == null ? "—" : `◆ ${tt.name}`, children: keys });
         } else {
           let text = fmtVal(val);
           if (f.type === "String" && typeof val === "string") text = `"${val}"`;
@@ -731,7 +731,7 @@
             const c = v.currency && (v.currency.code || (typeof v.currency === "string" ? v.currency : null));
             text = money(val, c);
           }
-          const row = { name: f.name, text, doc: f.doc };
+          const row = { name: f.name, text, doc: f.doc, raw: val };
           if (g && tt && tt.kind === "identifier" && M.identifies.has(g.id) && f.name !== "id")
             row.ref = { type: M.identifies.get(g.id), values: (g.many ? val || [] : val == null ? [] : [val]).map(idText) };
           o.rows.push(row);
@@ -795,6 +795,7 @@
         .map((l) => (l.row == null ? l : { ...l, row: remap.get(l.from).get(l.row) }));
     }
     const at = revealSchedule(sc, per);
+    per.forEach((fr, i) => { fr.byEvent = i > 0 ? eventChanges(M, sc.frames[i], per[i - 1], fr) : []; });
     for (const fr of per) {
       for (const k of [...fr.objs.keys()]) if (!at.has(k)) fr.objs.delete(k);
       fr.links = fr.links.filter((l) => fr.objs.has(l.from) && fr.objs.has(l.to));
@@ -819,6 +820,39 @@
     const links = new Map();
     for (const { links: ls } of per) for (const l of ls) links.set(l.from + ">" + l.to, l);
     return { per, at, nodes: [...union.values()], layoutEdges: [...links.values()] };
+  }
+
+  /** What one state changed in the next, for the objects `keep` holds: `"born"`, or the names
+   *  of the rows whose value changed. */
+  function changesBetween(a, b, keep) {
+    const out = new Map();
+    for (const [k, o] of keep.objs) {
+      const y = b.get(k); if (!y) continue;
+      const x = a.get(k);
+      if (!x) { out.set(k, "born"); continue; }
+      const was = new Map(x.rows.map((r) => [r.name, r.text]));
+      const names = new Set(o.rows.map((r) => r.name).filter((n) => { const r = y.rows.find((q) => q.name === n); return r && was.get(n) !== r.text; }));
+      if (names.size) out.set(k, names);
+    }
+    return out;
+  }
+  /** For each event a step records, the objects it created or changed. Exact when the step
+   *  carries the state after each event (`stages`); otherwise each change goes to the last event
+   *  recorded by that object's aggregate. */
+  function eventChanges(M, f, before, after) {
+    const evs = f.ok ? f.events || [] : [];
+    if (!evs.length) return [];
+    if (evs.length === 1 || (f.stages && f.stages.length === evs.length - 1)) {
+      const seq = [before.objs, ...(f.stages || []).map((st) => objectsOf(M, { state: st }).objs), after.objs];
+      return evs.map((_, i) => changesBetween(seq[i], seq[i + 1], after));
+    }
+    const all = changesBetween(before.objs, after.objs, after), out = evs.map(() => new Map());
+    const aggs = evs.map((e) => message(M, e, "evt").agg);
+    for (const [k, v] of all) {
+      const agg = k.split("/")[0], i = aggs.lastIndexOf(agg);
+      if (i >= 0) out[i].set(k, v);
+    }
+    return out;
   }
 
   /** A command or event, with its arguments named from the model. */
@@ -875,7 +909,7 @@
     return { name: frame.via, kind: "process", doc: p && p.doc,
       args: vals.map((t, i) => ({ name: tail[i] ? argName(tail[i]) : `arg ${i + 1}`, text: human(unparen(t)) })) };
   }
-  function ObjectView({ M, sc, step, phase, playing, sel, setSel, speed, follow }) {
+  function ObjectView({ M, sc, step, phase, playing, sel, setSel, speed, follow, goStep }) {
     const W = useMemo(() => scenarioWorld(M, sc), [M, sc]);
     const conts = useMemo(() => containers(M, false).filter((c) => c.kind !== "shared"), [M]);
     const [view, setView, tween] = useView();
@@ -975,7 +1009,21 @@
         return b;
       });
       for (const e of evts) e.x = x;
-      return { cmd, cbox, roots, evts, clock };
+      // What came before stays in the lane, faded, newest nearest: click one to go back to it.
+      const PAST = 10, older = Math.max(0, step - 1 - PAST);
+      const past = [];
+      let py = cbox.y - 18;
+      for (let i = step - 1; i >= 1 && i > older; i--) {
+        const f = sc.frames[i];
+        const name = f.actor === "clock" ? f.note : f.via || message(M, f.command, "cmd").name;
+        const evNames = f.ok ? (f.events || []).map((e) => message(M, e, "evt").name) : [];
+        const shownEv = evNames.slice(0, 3);
+        const h = 26 + (shownEv.length + (evNames.length > 3 ? 1 : 0)) * 15 + (shownEv.length ? 4 : 0);
+        py -= h;
+        past.push({ i, name, ok: f.ok, clock: f.actor === "clock", evNames, shownEv, x, y: py, w: cw, h, agg: (f.targets || [])[0] });
+        py -= 8;
+      }
+      return { cmd, cbox, roots, evts, clock, past, older, olderY: py - 22 };
     };
     const msgs = useMemo(() => msgsFor(pos), [world, W, step, pos]);
 
@@ -1086,7 +1134,33 @@
         <path d=${g.d} pathLength="1" markerEnd=${l.kind === "has" ? null : "url(#end-link)"} markerStart=${l.kind === "has" ? "url(#start-has)" : null} /></g>`;
     })}</g>`;
 
+    const flows = phase === 1 && msgs ? (cur.byEvent || []).flatMap((chg, i) => {
+      const e = msgs.evts[i]; if (!e) return [];
+      return [...chg].filter(([k]) => onPage(k)).slice(0, 8).map(([k, what]) => {
+        const n = posNode(k); if (!n) return null;
+        const o = cur.objs.get(k);
+        const rows = what === "born" || !o ? [] : o.rows.map((r, j) => (what.has(r.name) ? j : -1)).filter((j) => j >= 0);
+        const ty = rows.length ? n.p.y + OHEAD + rows[0] * ROW + ROW / 2 : n.p.y + 16;
+        const g = edgePath({ x: e.x, y: e.y, w: e.w, h: e.h }, e.y + e.h / 2, { x: n.p.x, y: n.p.y, w: n.w, h: n.h }, ty);
+        return { key: i + ">" + k, d: g.d, agg: e.agg, i, label: `${e.name} ${what === "born" ? "creates" : "changes"} ${objLabel(M, o || { key: k, typeId: "" })}${rows.length ? ": " + rows.map((j) => o.rows[j].name).join(", ") : ""}` };
+      }).filter(Boolean);
+    }) : [];
+    const pastLayer = msgs && msgs.past.length > 0 && html`<g className="past">
+      ${msgs.older > 0 && html`<text className="past-more" x=${msgs.cbox.x + 4} y=${msgs.olderY + 14}>+${plural(msgs.older, "earlier step")}</text>`}
+      ${msgs.past.map((p) => html`<g key=${"p" + p.i} className=${"past-card" + (p.ok ? "" : " refused") + (p.clock ? " clock" : "")} transform=${`translate(${p.x} ${p.y})`}
+          style=${{ "--h": M.hue(p.agg) }} role="button" tabIndex="0" aria-label=${`Go back to step ${p.i}: ${p.name}`}
+          onPointerDown=${(e) => { e.stopPropagation(); goStep && goStep(p.i); }}
+          onKeyDown=${(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); goStep && goStep(p.i); } }}>
+        <title>Step ${p.i}: ${p.name}${p.ok ? (p.evNames.length ? " → " + p.evNames.join(", ") : "") : " (refused)"}. Click to go back to it.</title>
+        <rect className="n-body" width=${p.w} height=${p.h} rx="7" />
+        <text className="past-head" x="10" y="17"><tspan className="past-n">${p.i}</tspan>  ${clip(p.name, F_ROW, p.w - 70)}<tspan className="past-mark">  ${p.clock ? "" : p.ok ? "✓" : "✕"}</tspan></text>
+        ${p.shownEv.map((n, j) => html`<text key=${j} className="past-ev" x="22" y=${33 + j * 15}>→ ${clip(n, F_ROW, p.w - 40)}</text>`)}
+        ${p.evNames.length > 3 && html`<text className="past-ev" x="22" y=${33 + 3 * 15}>+${p.evNames.length - 3} more</text>`}
+      </g>`)}</g>`;
     const overlay = msgs && html`<g className="msgs" key=${sc.id + ":" + step}>
+      ${pastLayer}
+      ${flows.map((fl) => html`<path key=${"f" + fl.key} className="m-flow" d=${fl.d} pathLength="1" markerEnd="url(#end-flow)"
+          style=${{ "--h": M.hue(fl.agg), animationDelay: (260 + fl.i * 90) / speed + "ms" }}><title>${fl.label}</title></path>`)}
       ${!msgs.clock && msgs.roots.map((r, i) => {
         const g = edgePath(msgs.cbox, msgs.cbox.y + 22, { x: r.p.x, y: r.p.y, w: r.w, h: r.h }, r.p.y + 16);
         return html`<path key=${"a" + i} className=${"m-arrow" + (phase === 1 && !frame.ok ? " bad" : "")} d=${g.d} pathLength="1"
@@ -1186,6 +1260,7 @@
           aria-label=${`Show ${h.name}, off screen`}><span className="arrow">${h.arrow}</span> ${h.name}${h.what ? html`<span className="what"> · ${h.what}</span>` : null}</button>`)}
       <div className="legend"><span><svg width="30" height="10"><path d="M2,5 H28" className="edge e-has" markerStart="url(#start-has)" /></svg>contains</span>
         <span><svg width="30" height="10"><path d="M2,5 H26" className="edge e-link" markerEnd="url(#end-link)" /></svg>refers to, by id</span>
+        <span><svg width="30" height="10"><path d="M2,5 H26" className="m-flow still" markerEnd="url(#end-flow)" /></svg>event changes</span>
         <span><i className="sw born" />new</span><span><i className="sw changed" />changed</span></div>
     </div>`;
   }
@@ -1297,6 +1372,52 @@
       return html`<span key=${k} className=${"fact" + (ch ? " changed" : "")}><span className="k">${k}</span> ${String(fmtVal(v)).replace(/^"|"$/g, "")}</span>`;
     })}</div>`;
   }
+  /** A value as an expandable tree: records and lists open on click, everything else inline. */
+  function ValueTree({ v, depth = 0 }) {
+    if (v === null || v === undefined || typeof v !== "object") return html`<span className="vt-leaf">${fmtVal(v)}</span>`;
+    const entries = Array.isArray(v) ? v.map((x, i) => [String(i), x]) : Object.entries(v);
+    if (!entries.length) return html`<span className="vt-leaf">${Array.isArray(v) ? "[]" : "{}"}</span>`;
+    return html`<details className="vt" open=${depth === 0 && entries.length <= 4}>
+      <summary><span className="vt-sum">${Array.isArray(v) ? plural(entries.length, "item") : fmtVal(v, 1)}</span></summary>
+      <dl>${entries.map(([k, x]) => html`<div key=${k} className="vt-row"><dt>${k}</dt><dd><${ValueTree} v=${x} depth=${depth + 1} /></dd></div>`)}</dl></details>`;
+  }
+  /** One object through the whole scenario: what it holds now, and every step that created or
+   *  changed it, with the event that did. */
+  function ObjectInspector({ M, sc, step, k, o, go }) {
+    const per = useMemo(() => sc.frames.map((f) => objectsOf(M, f)), [M, sc]);
+    const history = useMemo(() => {
+      const out = [];
+      for (let j = 1; j < sc.frames.length; j++) {
+        const a = per[j - 1].objs.get(k), b = per[j].objs.get(k), f = sc.frames[j];
+        if (!b && !a) continue;
+        const by = eventChanges(M, f, per[j - 1], per[j]);
+        const evs = (f.ok ? f.events || [] : []).map((e, i) => ({ name: message(M, e, "evt").name, hit: by[i] && by[i].has(k) })).filter((e) => e.hit);
+        if (!a) { out.push({ j, what: "created", evs, changes: [] }); continue; }
+        if (!b) { out.push({ j, what: "removed", evs, changes: [] }); continue; }
+        const was = new Map(a.rows.map((r) => [r.name, r.text]));
+        const changes = b.rows.filter((r) => was.get(r.name) !== r.text).map((r) => ({ name: r.name, from: was.get(r.name), to: r.text }));
+        if (changes.length) out.push({ j, what: "changed", evs, changes });
+      }
+      return out;
+    }, [per, k]);
+    return html`<div className="objdetail" style=${{ "--h": M.hue(o.agg) }}>
+      <h3><span className="swatch" />Selected object</h3>
+      <p className="mono-title u">${objLabel(M, o)}</p>
+      <${Def} doc=${(M.types.get(o.typeId) || {}).doc} decl=${o.typeId} />
+      <h3>Now, at step ${step} <span className="n">${o.rows.length}</span></h3>
+      <div className="rows">${o.rows.map((r) => html`<div className="row" key=${r.name}>
+        <div className="head"><span className="name">${r.name}</span>${r.raw === null || typeof r.raw !== "object" ? html`<span className="ty full">${r.text}</span>` : null}</div>
+        ${r.raw !== null && typeof r.raw === "object" && html`<div className="vt-wrap"><${ValueTree} v=${r.raw} /></div>`}
+        <${Def} doc=${r.doc} decl=${o.typeId + "." + r.name} className="d" /></div>`)}</div>
+      <h3>History <span className="n">${plural(history.length, "step")}</span></h3>
+      ${history.length ? html`<ol className="history">${history.map((h) => html`<li key=${h.j} className=${h.j === step ? "cur" : h.j > step ? "later" : ""}>
+          <button className="h-step" onClick=${() => go.scenario(sc.id, h.j)} aria-label=${`Go to step ${h.j}`}>${h.j}</button>
+          <div className="h-body">
+            <div className="h-what">${h.what === "changed" ? "changed" : h.what}${h.evs.length ? html` by <code>${h.evs.map((e) => e.name).join(", ")}</code>` : null}</div>
+            ${h.changes.map((c) => html`<div key=${c.name} className="h-chg"><span className="name">${c.name}</span> <span className="was">${c.from === undefined ? "—" : c.from}</span> → <b>${c.to}</b></div>`)}
+          </div></li>`)}</ol>` : html`<p className="doc">Nothing in this scenario changes it.</p>`}
+      <button className="pill" style=${{ marginTop: 10 }} onClick=${() => go.type(o.typeId)}>Open its class in the model</button></div>`;
+  }
   const frame0 = (f) => (f.via ? `Running ${f.via} across ${f.targets.length} aggregates…` : "The aggregate checks its rules…");
   function StepPanel({ M, sc, step, phase, go, sel }) {
     const f = sc.frames[step];
@@ -1331,6 +1452,7 @@
         ${phase === 1 ? html`<div className=${"verdict " + (f.ok ? "ok" : "bad")}><span className="mark">${f.ok ? "✓" : "✕"}</span>
           <span>${f.ok ? (f.events.length ? `Accepted: ${plural(f.events.length, "event")} recorded.` : "Accepted.") : "Refused, so nothing changed."}
           ${!f.ok && reason(f.error, M.ns, M, f.targets) && html`<span className="why">${reason(f.error, M.ns, M, f.targets)}</span>`}</span></div>` : html`<div className="verdict pending"><span className="mark">…</span><span>${frame0(f)}</span></div>`}`}
+      ${phase === 1 && (f.expect || []).length > 0 && html`<p className="checked" title="The build fails if a step does anything other than what its story says">✓ Checked when the domain is built: the story says ${f.expect[0]}.</p>`}
       ${phase === 1 && f.ok && (f.findings || []).length > 0 && html`<div className="verdict warn"><span className="mark">⚠</span>
         <span>Accepted, with ${plural(f.findings.length, "policy warning")}:${f.findings.map((x, i) => html`<span key=${i} className="why">${x}</span>`)}</span></div>`}
       ${phase === 1 && f.ok && f.events.length > 0 && html`<h3>Recorded <span className="n">${f.events.length}</span></h3>
@@ -1341,14 +1463,7 @@
         <div className="rows">${changes.slice(0, 40).map((c, i) => html`<button key=${i} className="row click" style=${{ "--h": M.hue(c.agg) }} onClick=${() => go.obj(c.k)}>
           <div className="head"><span className="swatch" /><span className="name">${c.label}</span><span className="ty">${c.what}</span></div>
           ${c.from !== undefined && html`<div className="d mono"><span className="was">${c.from}</span> → <b>${c.to}</b></div>`}</button>`)}</div>`}
-      ${o && html`<div className="objdetail" style=${{ "--h": M.hue(o.agg) }}>
-        <h3><span className="swatch" />Selected object</h3>
-        <p className="mono-title u">${objLabel(M, o)}</p>
-        <${Def} doc=${(M.types.get(o.typeId) || {}).doc} decl=${o.typeId} />
-        <div className="rows">${o.rows.map((r) => html`<div className="row" key=${r.name}>
-          <div className="head"><span className="name">${r.name}</span><span className="ty full">${r.text}</span></div>
-          <${Def} doc=${r.doc} decl=${o.typeId + "." + r.name} className="d" /></div>`)}</div>
-        <button className="pill" style=${{ marginTop: 10 }} onClick=${() => go.type(o.typeId)}>Open its class in the model</button></div>`}
+      ${o && html`<${ObjectInspector} M=${M} sc=${sc} step=${step} k=${sel} o=${o} go=${go} />`}
       ${M.d.scenarios.length > 1 && html`<h3>Scenarios</h3>
         <div className="scen-list">${M.d.scenarios.map((s) => html`<button key=${s.id} className="scen" aria-current=${s.id === sc.id} onClick=${() => go.scenario(s.id, 0)}>
           <b>${s.title}</b><span className="ticks">${s.frames.slice(1).map((x, i) => html`<i key=${i} className=${x.ok ? "" : "bad"} />`)}</span></button>`)}</div>`}
@@ -1468,7 +1583,7 @@
       </header>
       <div className="main">
         ${!ready ? html`<div className="loading">Loading…</div>` : sc
-          ? html`<${ObjectView} key=${sc.id} M=${M} sc=${sc} step=${step} phase=${phase} playing=${playing} sel=${objSel} setSel=${(k) => { setObjSel(k); if (k) setAside(true); }} speed=${speed} follow=${follow} />`
+          ? html`<${ObjectView} key=${sc.id} M=${M} sc=${sc} step=${step} phase=${phase} playing=${playing} sel=${objSel} setSel=${(k) => { setObjSel(k); if (k) setAside(true); }} speed=${speed} follow=${follow} goStep=${(i) => { setPlaying(false); setStep(i); }} />`
           : html`<${ClassView} M=${M} sel=${route.sel} setSel=${(id) => nav({ tab: "model", sel: id })} layers=${layers} />`}
         ${aside && html`<aside className="aside"><div className="aside-inner">
           ${sc ? html`<${StepPanel} M=${M} sc=${sc} step=${step} phase=${phase} go=${go} sel=${objSel} />`
