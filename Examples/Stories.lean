@@ -1,5 +1,6 @@
 import DDD.Viz
 import Examples.Account
+import Examples.AccountService
 
 /-!
 # Stories that do not build
@@ -9,7 +10,7 @@ something else. These are the mistakes it catches, each with the message it give
 -/
 
 namespace Examples.Stories
-open Lean DDD DDD.Viz Examples.Account
+open Lean DDD DDD.Viz Examples.Account Examples.AccountService
 
 deriving instance ToJson for Account
 
@@ -84,5 +85,57 @@ story ghost "ghost" "Notes about objects that are not there"
     says: "Open with $50."
     expect: accepted "deposited"
     note: "account/owner" "Nobody owns it."
+
+/-! ## Use cases and the outside: a story can't hide a call, or claim one -/
+
+/-- The acquirer's Charges API, approving every hold and capturing all of it. -/
+def approving : Charges Script where
+  authorize _ n := Script.reply "charges" "authorize" s!"{n}"
+    (.ok { auth_id := "a", amount_minor := n, currency := "USD", status := "approved" } : Except AcquirerError _)
+  capture id := Script.reply "charges" "capture" id
+    (.ok { capture_id := "c", auth_id := id, amount_minor := 50, currency := "USD" } : Except AcquirerError _)
+
+def byCard (note : String) : Beat World :=
+  serviceBeat "account-service" "depositByCard" note "customer" ["account"] "depositByCard 50" fun w => do
+    let r ← depositByCard approving w ⟨"tok"⟩ 50
+    pure <| match r with
+      | .ok w' => (w', { ok := true, events := newEvents w w' })
+      | .error e => (w, Viz.Outcome.ofAppError e)
+
+/--
+error: story "hidden" does not match the domain (1 problems):
+  • step 1 ("Deposit $50 by card"): it calls charges.authorize, charges.capture; say so with `asks:`. Write: asks: "charges.authorize", "charges.capture"
+-/
+#guard_msgs in
+story hidden "hidden" "Does not say the step calls the acquirer"
+  from ([] : World) using snap
+  | byCard "Deposit $50 by card"
+    says: "The customer deposits $50."
+    expect: accepted "deposited"
+
+/--
+error: story "claimed" does not match the domain (1 problems):
+  • step 1 ("Deposit $50 by card"): the story says it asks refunds.refund, but it asked charges.authorize, charges.capture. Write: asks: "charges.authorize", "charges.capture"
+-/
+#guard_msgs in
+story claimed "claimed" "Says the step asks for a refund"
+  from ([] : World) using snap
+  | byCard "Deposit $50 by card"
+    asks: "refunds.refund"
+    says: "The customer deposits $50."
+    expect: accepted "deposited"
+
+/--
+error: story "outage" does not match the domain (1 problems):
+  • step 1 ("Deposit $50 by card"): the story says it fails with acquirer-unavailable, but it was accepted, recording deposited. If the story is wrong, write: expect: accepted "deposited"
+-/
+#guard_msgs in
+story outage "outage" "Says a deposit that went through failed"
+  from ([] : World) using snap
+  | byCard "Deposit $50 by card"
+    asks: "charges.authorize", "charges.capture"
+    says: "The acquirer is down."
+    expect: failed "acquirer-unavailable"
+
 
 end Examples.Stories

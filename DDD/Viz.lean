@@ -1,6 +1,7 @@
 import Lean
 import DDD.Aggregate
 import DDD.CommandPath
+import DDD.App
 
 /-!
 # Visualising a domain
@@ -55,6 +56,48 @@ structure ContextSpec where
   /-- Ids of the aggregates inside it. -/
   aggregates : List String
 
+/-- A system outside the domain: a payment provider, a model, a bank. -/
+structure SystemSpec where
+  id : String
+  name : String
+  doc : String := ""
+  /-- What sort of system it is: `"payment provider"`, `"LLM"`. -/
+  kind : String := ""
+  /-- Its separately documented APIs, as (id, what it is): Stripe's `payouts`, `balance`. A
+  port says which of them it covers. -/
+  apis : List (String × String) := []
+
+/-- A port: an interface the application owns, in the domain's words. `decl` is a structure
+whose fields are its operations, over a monad (see `DDD.App`); each operation has its own
+request and response types, the port's DTOs. -/
+structure PortSpec where
+  id : String
+  decl : Name
+  /-- The external system behind it. -/
+  system : Option String := none
+  /-- Which of that system's APIs it covers. Empty: all of it, one port for the whole
+  system. Several ports may front one system, one per API. -/
+  apis : List String := []
+  /-- The anti-corruption layer: functions from the system's DTOs to the domain's types. -/
+  acl : List Name := []
+
+/-- A use case: one operation of an application service, and one transaction. -/
+structure UseCaseSpec where
+  id : String
+  decl : Name
+  /-- The ports it calls; each must be one of its service's. -/
+  asks : List String := []
+  /-- The aggregates it loads and changes. -/
+  changes : List String := []
+
+/-- An application service: related use cases, and the ports they share. -/
+structure ServiceSpec where
+  id : String
+  name : String
+  doc : String := ""
+  ports : List String := []
+  useCases : List UseCaseSpec
+
 structure Spec where
   id : String
   title : String
@@ -73,6 +116,11 @@ structure Spec where
   extraTypes : List Name := []
   /-- Override a type's kind (`entity`, `value`, `identifier`, ...). -/
   kinds : List (Name × String) := []
+  /-- Systems outside the domain that ports talk to. -/
+  systems : List SystemSpec := []
+  ports : List PortSpec := []
+  /-- Application services, each a group of use cases. -/
+  services : List ServiceSpec := []
 
 /-! ## Scenarios -/
 
@@ -100,6 +148,9 @@ inductive Result where
   | blocked (rules : List String) (facts : List String)
   /-- The aggregate refused it: the constructor of its reason, or `""` if it gives none. -/
   | refused (reason : String)
+  /-- A use case failed before the domain decided: the outside was down, or answered
+  something the anti-corruption layer would not take. -/
+  | failed (reason : String)
   deriving Repr, BEq, Inhabited
 
 private def names (xs : List String) : String := ", ".intercalate xs
@@ -113,6 +164,12 @@ def Result.say : Result → String
   | .blocked rs fs => s!"blocked by {names rs} and held until {names fs} is set"
   | .refused "" => "refused"
   | .refused r => s!"refused: {r}"
+  | .failed r => s!"failed: {r}"
+
+/-- What happened, as a clause: "it was accepted, recording paid", "it failed with x". -/
+def Result.happened : Result → String
+  | .failed r => s!"it failed with {r}"
+  | r => s!"it was {r.say}"
 
 structure Outcome where
   ok : Bool
@@ -125,6 +182,8 @@ structure Outcome where
   warned : List String := []
   /-- What happened, for checking against what the story says. -/
   result : Result := if ok then .accepted (events.map ctorName) warned else .refused ""
+  /-- The calls a use case made through its ports, in order. -/
+  calls : List Call := []
 
 /-- What a story says a step does. A step must say it, and the build fails when the step
 does something else. -/
@@ -140,6 +199,8 @@ inductive Expect where
   /-- Held by policy until these facts are set. -/
   | needs (facts : List String)
   | stale
+  /-- The use case failed before the domain decided, for this reason. -/
+  | failed (reason : String)
   deriving Repr, BEq, Inhabited
 
 def Expect.matches : Expect → Result → Bool
@@ -149,6 +210,7 @@ def Expect.matches : Expect → Result → Bool
   | .blocked rs, .blocked rs' [] => rs == rs'
   | .needs fs, .blocked [] fs' => fs == fs'
   | .stale, .stale => true
+  | .failed r, .failed r' => r == r'
   | _, _ => false
 
 def Expect.say : Expect → String
@@ -158,6 +220,13 @@ def Expect.say : Expect → String
   | .blocked rs => s!"blocked by {names rs}"
   | .needs fs => s!"held until {names fs} is set"
   | .stale => "rejected as stale"
+  | .failed r => s!"failed: {r}"
+
+/-- What a story says a step does, as a clause: "it is blocked by x", "it fails with y". -/
+def Expect.claim (e : Expect) : String :=
+  match e with
+  | .failed r => s!"it fails with {r}"
+  | _ => s!"it is {e.say}"
 
 /-- How to write what actually happened as an `expect:` line, for the error message. -/
 def Result.expectLine : Result → String
@@ -169,6 +238,7 @@ def Result.expectLine : Result → String
   | .blocked _ fs => s!"expect: needs {", ".intercalate (fs.map (s!"\"{·}\""))}"
   | .refused "" => "expect: refused"
   | .refused r => s!"expect: refused \"{r}\""
+  | .failed r => s!"expect: failed \"{r}\""
 
 /-- What a person reads at one step of a story: what is happening, in words, and notes
 pinned to particular objects. -/
@@ -183,6 +253,8 @@ structure Telling where
   reveal : List String := []
   /-- What the step does, from `expect:`. A story step must have exactly one. -/
   expect : List Expect := []
+  /-- The port operations the step calls, in order (`"port.op"`), from `asks:`. -/
+  asks : Option (List String) := none
 
 /-- One step of a scenario: who does what to which aggregates, and how to run it. -/
 structure Beat (W : Type) where
@@ -192,6 +264,9 @@ structure Beat (W : Type) where
   actor : String := ""
   /-- The process it goes through, if any (a `ProcSpec` id). -/
   via : Option String := none
+  /-- The application service and use case it calls, if any (`ServiceSpec` and
+  `UseCaseSpec` ids). -/
+  service : Option (String × String) := none
   targets : List String
   command : String
   run : W → W × Outcome
@@ -226,6 +301,46 @@ def _root_.DDD.Rejection.result {X : Type} [Repr X] : Rejection X → Result
       (v.dispositions.filterMap fun | .needsFact _ f => some f | _ => none)
   | .impossible x => .refused (ctorName (reprStr x))
 
+/-- Send one command through `submit`: the log after it, and what happened. -/
+def decide {Ctx S C E X : Type} [Repr E] [Repr X] (agg : Aggregate S C E X)
+    (rules : List (Rule Ctx S C)) (ctx : Ctx) (log : List E) (c : C) : List E × Outcome :=
+  match submit agg rules .enforcing [] ctx log log.length c with
+  | .ok (log', fs) => (log',
+      { ok := true, events := newEvents log log', findings := fs.map Finding.say,
+        warned := (fs.map (·.rule)).eraseDups })
+  | .error why => (log, { ok := false, error := reprStr why, result := why.result })
+
+/-- A use case that failed before the domain decided. -/
+def Outcome.failed (reason : String) : Outcome :=
+  { ok := false, error := reason, result := .failed reason }
+
+/-- What a use case's `AppError` was, as an outcome. -/
+def Outcome.ofAppError {X : Type} [Repr X] : AppError X → Outcome
+  | .refused why => { ok := false, error := reprStr why, result := why.result }
+  | .failed r => Outcome.failed r
+
+/-- Two decisions in one use case: the second only counts if the first went through. -/
+def Outcome.andThen (a b : Outcome) : Outcome :=
+  if !a.ok then a else
+  let events := a.events ++ b.events
+  let warned := (a.warned ++ b.warned).eraseDups
+  { ok := b.ok, error := b.error, events := if b.ok then events else [],
+    findings := a.findings ++ b.findings, warned,
+    result := if b.ok then .accepted (events.map ctorName) warned else b.result,
+    calls := a.calls ++ b.calls }
+
+/-- A step that calls a use case of an application service. `run` is the use case with its
+ports answered by a script: the world after it, and what happened. The calls it made are
+recorded with the outcome, and the story's `asks:` line is checked against them. -/
+def serviceBeat {W : Type} (service useCase : String) (note actor : String)
+    (targets : List String) (command : String) (run : W → Script (W × Outcome)) : Beat W where
+  note := note
+  actor := actor
+  service := some (service, useCase)
+  targets := targets
+  command := command
+  run w := let ((w', o), calls) := (run w).run'; (w', { o with calls })
+
 /-- A beat that sends one command to one aggregate through the command path. Pass the
 command, event and rejection types by name (`(C := Cmd) (E := Evt) (X := Why)`) so their
 `Repr` instances are found. -/
@@ -239,11 +354,8 @@ def submitBeat {W Ctx S C E X : Type} [Repr C] [Repr E] [Repr X]
   command := reprStr c
   run w :=
     let log := get w
-    match submit agg (rules w) .enforcing [] (ctx w) log log.length c with
-    | .ok (log', fs) => (set w log',
-        { ok := true, events := newEvents log log', findings := fs.map Finding.say,
-          warned := (fs.map (·.rule)).eraseDups })
-    | .error why => (w, { ok := false, error := reprStr why, result := why.result })
+    let (log', o) := decide agg (rules w) (ctx w) log c
+    (if o.ok then set w log' else w, o)
   stages w :=
     let log := get w
     match submit agg (rules w) .enforcing [] (ctx w) log log.length c with
@@ -309,6 +421,11 @@ def playChecked {W : Type} (snap : W → List (String × Json)) (w₀ : W) (beat
       ("note", toJson ((b.map (·.note)).getD "The starting state")),
       ("actor", toJson ((b.map (·.actor)).getD "")),
       ("via", match b.bind (·.via) with | some v => toJson v | none => Json.null),
+      ("service", match b.bind (·.service) with
+        | some (sv, uc) => Json.mkObj [("service", toJson sv), ("useCase", toJson uc)]
+        | none => Json.null),
+      ("calls", Json.arr (o.calls.map fun c => Json.mkObj [("port", toJson c.port), ("op", toJson c.op),
+        ("args", toJson c.args), ("result", toJson c.result), ("ok", toJson c.ok)]).toArray),
       ("targets", toJson ((b.map (·.targets)).getD [])),
       ("command", toJson ((b.map (·.command)).getD "")),
       ("ok", toJson o.ok), ("error", toJson o.error), ("events", toJson o.events),
@@ -326,10 +443,17 @@ def playChecked {W : Type} (snap : W → List (String × Json)) (w₀ : W) (beat
     let expectPs := if !checked then [] else match b.telling.expect with
       | [] => [s!"{here}: say what it does with `expect:`; it was {o.result.say}. Write: {o.result.expectLine}"]
       | [e] => if e.matches o.result then []
-        else [s!"{here}: the story says it is {e.say}, but it was {o.result.say}. If the story is wrong, write: {o.result.expectLine}"]
+        else [s!"{here}: the story says {e.claim}, but {o.result.happened}. If the story is wrong, write: {o.result.expectLine}"]
       | _ => [s!"{here}: has more than one `expect:`"]
+    let made := o.calls.map fun c => s!"{c.port}.{c.op}"
+    let q (xs : List String) := ", ".intercalate (xs.map (s!"\"{·}\""))
+    let asksPs := if !checked then [] else match b.telling.asks with
+      | none => if made.isEmpty then [] else
+        [s!"{here}: it calls {", ".intercalate made}; say so with `asks:`. Write: asks: {q made}"]
+      | some xs => if xs == made then [] else
+        [s!"{here}: the story says it asks {if xs.isEmpty then "nothing" else ", ".intercalate xs}, but it asked {if made.isEmpty then "nothing" else ", ".intercalate made}. Write: asks: {q made}"]
     let sayPs := if checked && b.telling.say.isEmpty then [s!"{here}: has no `says:`; tell a reader what is happening"] else []
-    (w', acc ++ [frame w' (some b) o], ps ++ expectPs ++ sayPs ++ keyProblems here b.telling w', i + 1))
+    (w', acc ++ [frame w' (some b) o], ps ++ expectPs ++ asksPs ++ sayPs ++ keyProblems here b.telling w', i + 1))
     (w₀, [frame w₀ none { ok := true }], keyProblems "the opening" opening w₀ ++
       (if opening.expect.isEmpty then [] else ["the opening: `expect:` belongs to a step, not the opening"]), 1)
   (Json.arr frames.toArray, problems)
@@ -387,13 +511,15 @@ inductive StoryLine where
   | note (at_ text : String)
   | show (keys : List String)
   | expect (e : Expect)
+  | asks (ops : List String)
 
 /-- A step's lines, gathered into what is told. -/
 def Telling.of (ls : List StoryLine) : Telling := ls.foldl (fun t l => match l with
   | .says x => { t with say := if t.say.isEmpty then x else t.say ++ "\n\n" ++ x }
   | .note a x => { t with notes := t.notes ++ [(a, x)] }
   | .show ks => { t with reveal := t.reveal ++ ks }
-  | .expect e => { t with expect := t.expect ++ [e] }) {}
+  | .expect e => { t with expect := t.expect ++ [e] }
+  | .asks xs => { t with asks := some ((t.asks.getD []) ++ xs) }) {}
 
 /-- A scenario from a story: its opening lines and its steps, each a beat with what it tells. -/
 def tell {W : Type} (id title doc : String) (snap : W → List (String × Json)) (w₀ : W)
@@ -423,7 +549,11 @@ syntax &"refused" (str)? : storyExpect
 syntax &"blocked" str,+ : storyExpect
 syntax &"needs" str,+ : storyExpect
 syntax &"stale" : storyExpect
+syntax &"failed" str : storyExpect
 syntax "expect: " storyExpect : storyLine
+/-- The port operations a step calls, in order: `asks: "payouts.create", "balance.retrieve"`.
+A step that calls any must say so, and the build fails if it calls others. -/
+syntax "asks: " str,* : storyLine
 
 declare_syntax_cat storyStep
 syntax "| " term (ppLine storyLine)* : storyStep
@@ -445,6 +575,8 @@ macro_rules
   | `(story_line% expect: blocked $rs:str,*) => `(StoryLine.expect (Expect.blocked [$rs,*]))
   | `(story_line% expect: needs $fs:str,*) => `(StoryLine.expect (Expect.needs [$fs,*]))
   | `(story_line% expect: stale) => `(StoryLine.expect Expect.stale)
+  | `(story_line% expect: failed $r:str) => `(StoryLine.expect (Expect.failed $r))
+  | `(story_line% asks: $xs:str,*) => `(StoryLine.asks [$xs,*])
 
 syntax "story_step% " storyStep : term
 macro_rules
@@ -598,11 +730,66 @@ private def aboutAggregates (spec : Spec) (n : Name) : MetaM (List String) := do
 private def signature (spec : Spec) (n : Name) : MetaM String := do
   return strip spec (toString (← PrettyPrinter.ppSignature n).fmt)
 
+/-- A port's operations: each field of its structure, past the monad and `self`, with its
+arguments, what it returns inside the monad, and the domain types they mention. -/
+private def portOps (spec : Spec) (decl : Name) : MetaM (Array Json × Array Name) := do
+  let env ← getEnv
+  let .inductInfo v ← getConstInfo decl | throwError "port {decl} is not a structure"
+  let mut ops := #[]
+  let mut refs := #[]
+  for f in getStructureFields env decl do
+    let proj := decl ++ f
+    let some ci := env.find? proj | continue
+    let r ← forallBoundedTelescope ci.type (some (v.numParams + 1)) fun ps body => do
+      forallTelescope body fun xs res => do
+        let args ← xs.mapM fun x => do
+          let d ← x.fvarId!.getDecl
+          return Json.mkObj [("name", toJson d.userName.eraseMacroScopes.toString), ("type", toJson (← ppE spec d.type))]
+        -- `m T`: show `T`
+        let ret := if res.isApp && ps.any (· == res.appFn!) then res.appArg! else res
+        let tys ← xs.mapM fun x => inferType x
+        let used := (tys.toList.flatMap fun t => (typeRefs env spec t).toList) ++ (typeRefs env spec ret).toList
+        return (Json.mkObj [("name", toJson f.toString), ("doc", toJson (← docOf proj)),
+          ("args", Json.arr args), ("returns", toJson (← ppE spec ret)),
+          ("refs", toJson (used.eraseDups.map (·.toString)))], used)
+    ops := ops.push r.1
+    refs := refs ++ r.2.toArray
+  return (ops, refs)
+
+/-- The domain types a function's arguments and its result mention. -/
+private def fnRefs (spec : Spec) (n : Name) : MetaM (List Name × List Name) := do
+  let env ← getEnv
+  let ci ← getConstInfo n
+  forallTelescope ci.type fun xs res => do
+    let tys ← xs.mapM inferType
+    return ((tys.toList.flatMap fun t => (typeRefs env spec t).toList).eraseDups,
+      (typeRefs env spec res).toList)
+
 /-- Everything the viewer needs about the domain's structure. -/
 def model (spec : Spec) : MetaM Json := do
   let env ← getEnv
-  let roots := spec.aggregates.flatMap (fun a => [a.state, a.cmd, a.evt] ++ a.err.toList) ++ spec.extraTypes
+  let domainRoots := spec.aggregates.flatMap (fun a => [a.state, a.cmd, a.evt] ++ a.err.toList) ++ spec.extraTypes
+  -- The ports' operations and anti-corruption layers, and the DTOs they mention.
+  let portsData ← spec.ports.filterMapM fun p => do
+    if !env.contains p.decl then return none
+    let (ops, refs) ← portOps spec p.decl
+    let acl ← p.acl.filterMapM fun a => do
+      if !env.contains a then return none
+      let (from_, to) ← fnRefs spec a
+      return some (Json.mkObj [("name", toJson (strip spec a.toString)), ("doc", toJson (← docOf a)),
+        ("signature", toJson (← signature spec a)), ("from", toJson (from_.map (·.toString))),
+        ("to", toJson (to.map (·.toString)))], from_)
+    return some (p, ops, refs, acl)
+  let dtoRoots := portsData.flatMap fun (_, _, refs, acl) => refs.toList ++ acl.flatMap (·.2)
+  let roots := domainRoots ++ dtoRoots
   let graph ← crawl spec roots
+  -- A type the aggregates never reach is a DTO, kept by the system behind the first port
+  -- that mentions it.
+  let domainSet := domainRoots.foldl (fun s r => (reachable graph r).toList.foldl (·.insert ·) s) ({} : NameSet)
+  let dtoSystem : List (Name × String) := portsData.flatMap fun (p, _, refs, acl) =>
+    let rs := refs.toList ++ acl.flatMap (·.2)
+    let reach := rs.foldl (fun s r => (reachable graph r).toList.foldl (·.insert ·) s) ({} : NameSet)
+    reach.toList.filter (!domainSet.contains ·) |>.map (·, p.system.getD "")
   -- Which aggregate's state reaches each type; several: shared.
   let owners := spec.aggregates.map fun a =>
     let r := [a.state, a.cmd, a.evt].flatMap (fun n => (reachable graph n).toList)
@@ -611,10 +798,13 @@ def model (spec : Spec) : MetaM Json := do
     let ownedBy := owners.filter (·.2.contains n) |>.map (·.1)
     let fields := j.getObjValD "fields"
     let ctors := j.getObjValD "ctors"
+    let dto := !domainSet.contains n
     return Json.mkObj [("id", toJson n.toString), ("name", toJson (strip spec n.toString)),
-      ("kind", toJson (kindOf env spec n)), ("doc", toJson (← docOf n)),
+      ("kind", toJson (if dto && (spec.kinds.lookup n).isNone then "dto" else kindOf env spec n)),
+      ("doc", toJson (← docOf n)),
       ("owners", toJson ownedBy), ("fields", fields), ("ctors", ctors),
-      ("edges", Json.arr es)]
+      ("edges", Json.arr es)] |>.mergeObj
+      (if dto then Json.mkObj [("system", toJson ((dtoSystem.lookup n).getD ""))] else Json.mkObj [])
   let aggs ← spec.aggregates.mapM fun a => do
     let invs ← a.invariants.filterMapM fun t => do
       if env.contains t then
@@ -643,6 +833,21 @@ def model (spec : Spec) : MetaM Json := do
     ("ns", toJson spec.ns.toString),
     ("contexts", Json.arr (spec.contexts.map fun c => Json.mkObj [("id", toJson c.id),
       ("title", toJson c.title), ("doc", toJson c.doc), ("aggregates", toJson c.aggregates)]).toArray),
+    ("systems", Json.arr (spec.systems.map fun s => Json.mkObj [("id", toJson s.id), ("name", toJson s.name),
+      ("doc", toJson s.doc), ("kind", toJson s.kind),
+      ("apis", Json.arr (s.apis.map fun (i, d) => Json.mkObj [("id", toJson i), ("doc", toJson d)]).toArray)]).toArray),
+    ("ports", Json.arr (← portsData.mapM fun (p, ops, _, acl) => do
+      return Json.mkObj [("id", toJson p.id), ("name", toJson (strip spec p.decl.toString)),
+        ("doc", toJson (← docOf p.decl)), ("system", match p.system with | some s => toJson s | none => Json.null),
+        ("apis", toJson p.apis), ("ops", Json.arr ops), ("acl", Json.arr (acl.map (·.1)).toArray)]).toArray),
+    ("services", Json.arr (← spec.services.mapM fun sv => do
+      let ucs ← sv.useCases.filterMapM fun u => do
+        if !env.contains u.decl then return none
+        return some (Json.mkObj [("id", toJson u.id), ("name", toJson (strip spec u.decl.toString)),
+          ("doc", toJson (← docOf u.decl)), ("signature", toJson (← signature spec u.decl)),
+          ("asks", toJson u.asks), ("changes", toJson u.changes)])
+      return Json.mkObj [("id", toJson sv.id), ("name", toJson sv.name), ("doc", toJson sv.doc),
+        ("ports", toJson sv.ports), ("useCases", Json.arr ucs.toArray)]).toArray),
     ("aggregates", Json.arr aggs.toArray), ("processes", Json.arr procs.toArray),
     ("theorems", Json.arr thms.toArray), ("types", Json.arr types)]
 
@@ -732,6 +937,44 @@ script. Warns about terms with no doc comment (see `glossaryGaps`). -/
 def emit (spec : Spec) (scenarios : List Scenario) (dir : System.FilePath := "site") :
     CommandElabM Unit := do
   for s in scenarios do s.check
+  let env ← getEnv
+  let mut bad : Array String := #[]
+  for p in spec.ports do
+    unless env.contains p.decl do bad := bad.push s!"port {p.id}: no declaration {p.decl}"
+    for a in p.acl do unless env.contains a do bad := bad.push s!"port {p.id}: no declaration {a}"
+    match p.system with
+    | none => unless p.apis.isEmpty do bad := bad.push s!"port {p.id}: names APIs but no system"
+    | some sid => match spec.systems.find? (·.id == sid) with
+      | none => bad := bad.push s!"port {p.id}: no system {sid}"
+      | some sys => for a in p.apis do
+          unless sys.apis.any (·.1 == a) do bad := bad.push s!"port {p.id}: {sys.name} has no API {a}"
+  for sv in spec.services do
+    for pid in sv.ports do
+      unless spec.ports.any (·.id == pid) do bad := bad.push s!"service {sv.id}: no port {pid}"
+    for u in sv.useCases do
+      unless env.contains u.decl do bad := bad.push s!"use case {sv.id}.{u.id}: no declaration {u.decl}"
+      for pid in u.asks do
+        unless sv.ports.contains pid do bad := bad.push s!"use case {sv.id}.{u.id}: asks {pid}, which is not one of {sv.id}'s ports"
+      for a in u.changes do
+        unless spec.aggregates.any (·.id == a) do bad := bad.push s!"use case {sv.id}.{u.id}: no aggregate {a}"
+  -- A story's use case may only call the ports its spec says it asks.
+  for sc in scenarios do
+    let frames := (sc.frames.getArr?.toOption.getD #[]).toList
+    for (fr, i) in frames.zipIdx do
+      let .ok svc := fr.getObjVal? "service" | continue
+      let .ok svId := svc.getObjValAs? String "service" | continue
+      let .ok ucId := svc.getObjValAs? String "useCase" | continue
+      let calls := ((fr.getObjVal? "calls").toOption.bind (·.getArr?.toOption)).getD #[]
+      match spec.services.find? (·.id == svId) with
+      | none => bad := bad.push s!"story {sc.id}, step {i}: no service {svId}"
+      | some sv => match sv.useCases.find? (·.id == ucId) with
+        | none => bad := bad.push s!"story {sc.id}, step {i}: {sv.id} has no use case {ucId}"
+        | some u => for c in calls do
+            let port := (c.getObjValAs? String "port").toOption.getD "?"
+            unless u.asks.contains port do
+              bad := bad.push s!"story {sc.id}, step {i}: {sv.id}.{u.id} calls {port}, but its spec does not say it asks {port}"
+  unless bad.isEmpty do
+    throwError m!"the spec does not match the code:\n" ++ "\n".intercalate (bad.toList.map ("  • " ++ ·))
   let d ← liftTermElabM (data spec scenarios)
   IO.FS.createDirAll (dir / "data")
   IO.FS.writeFile (dir / "data" / s!"{spec.id}.json") d.compress

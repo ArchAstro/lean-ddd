@@ -105,6 +105,7 @@
     for (const t of d.types) {
       const r = role.get(t.id);
       if (r) { place.set(t.id, { level: "agg", id: r.agg }); continue; }
+      if (t.kind === "dto") { place.set(t.id, { level: "sys", id: t.system || "" }); continue; }
       const owners = t.owners || [];
       if (owners.length === 1) { place.set(t.id, { level: "agg", id: owners[0] }); continue; }
       const cs = new Set(owners.map((o) => ctxOf.get(o) || "solo:" + o));
@@ -159,15 +160,17 @@
       return best;
     };
     const ctor = (typeId, name) => ((types.get(typeId) || {}).ctors || []).find((c) => c.name === name);
-    return { kindOfId, d, ns: d.ns, types, aggs, contexts, ctxOf, hue, typeHue, place, role, kind, fields, target, identifies, byPrefix, ctor,
+    const systems = d.systems || [], ports = d.ports || [], services = d.services || [];
+    return { systems, ports, services, system: (id) => systems.find((x) => x.id === id), port: (id) => ports.find((x) => x.id === id),
+      service: (id) => services.find((x) => x.id === id), kindOfId, d, ns: d.ns, types, aggs, contexts, ctxOf, hue, typeHue, place, role, kind, fields, target, identifies, byPrefix, ctor,
       agg: (id) => aggs.find((a) => a.id === id), proc: (id) => d.processes.find((p) => p.id === id) };
   }
 
   const KIND_N = { aggregate: ["aggregate root", "aggregate roots"], entity: ["entity", "entities"], value: ["value object", "value objects"],
     identifier: ["identifier", "identifiers"], enum: ["enumeration", "enumerations"], choice: ["choice type", "choice types"],
-    command: ["command type", "command types"], event: ["event type", "event types"], rejection: ["rejection type", "rejection types"] };
+    command: ["command type", "command types"], event: ["event type", "event types"], rejection: ["rejection type", "rejection types"], dto: ["DTO", "DTOs"] };
   const STEREO = { aggregate: "aggregate root", entity: "entity", value: "value object", identifier: "identifier", enum: "enumeration",
-    choice: "choice", command: "commands", event: "events", rejection: "rejections", process: "process" };
+    choice: "choice", command: "commands", event: "events", rejection: "rejections", process: "process", dto: "DTO", service: "application service", acl: "anti-corruption layer", system: "external system" };
 
   /* ================= frames ================= */
   /** Bounded contexts holding aggregate boundaries; a shared kernel; the processes. */
@@ -177,17 +180,35 @@
     for (const a of M.aggs) cs.push({ id: "agg:" + a.id, parent: M.ctxOf.has(a.id) ? "ctx:" + M.ctxOf.get(a.id) : null, kind: "aggregate", label: a.name, sub: "aggregate", agg: a.id, hue: M.hue(a.id) });
     cs.push({ id: "shared", parent: null, kind: "shared", label: "Shared kernel", sub: "used across contexts" });
     if (withProcs) cs.push({ id: "procs", parent: null, kind: "procs", label: "Processes", sub: "change several aggregates, all or nothing" });
+    if (M.services.length || M.ports.length) cs.push({ id: "app", parent: null, kind: "app", label: "Application layer", sub: "use cases, and the ports they call" });
+    for (const x of M.systems) cs.push({ id: "sys:" + x.id, parent: null, kind: "system", label: x.name, sub: "external" + (x.kind ? " " + x.kind : "") });
+    cs.push({ id: "sys:", parent: null, kind: "system", label: "Outside", sub: "types the ports use" });
     return cs;
   }
   const containerOfType = (M, id) => {
     const p = M.place.get(id);
     if (!p || p.level === "shared") return "shared";
+    if (p.level === "sys") return "sys:" + p.id;
     return p.level === "agg" ? "agg:" + p.id : "ctx:" + p.id;
   };
 
   /* ================= the class diagram ================= */
   const argText = (a) => (a.name.includes("✝") || /^a\d*$/.test(a.name) ? a.type : `${a.name}: ${a.type}`);
-  const classRowText = (r) => (r.args ? (r.args.length ? `${r.name}(${r.args.join(", ")})` : r.name) : `${r.name}: ${r.type}`);
+  const classRowText = (r) => (r.args ? (r.args.length || r.ret ? `${r.name}(${r.args.join(", ")})` : r.name) + (r.ret ? " → " + r.ret : "") : `${r.name}: ${r.type}`);
+  /** What a port fronts, in words: one API, several, or the whole system. */
+  function fronts(M, p) {
+    const sys = p.system && M.system(p.system);
+    if (!sys) return "";
+    if (!p.apis.length) return `all of ${sys.name}`;
+    const name = (a) => a;
+    return `${sys.name}: ${p.apis.map(name).join(", ")} API${p.apis.length > 1 ? "s" : ""}`;
+  }
+  /** `f (a : A) (b : B) : R` as the argument types and `R`. */
+  function sigParts(sig) {
+    const i = sig.lastIndexOf(") : "), ret = i >= 0 ? sig.slice(i + 4) : (sig.split(" : ").slice(1).join(" : "));
+    const args = [...sig.matchAll(/\(([^():]+?) : ([^()]+(?:\([^()]*\)[^()]*)*)\)/g)].map((m) => m[2].trim());
+    return { args, ret };
+  }
   function classGraph(M) {
     const nodes = [], edges = [];
     const resolve = (tid) => {
@@ -237,8 +258,42 @@
       nodes.push({ id: "proc:" + p.id, kind: "process", title: p.name, stereo: "process", rows: p.touches.map((t) => ({ name: "changes", type: (M.agg(t) || {}).name || t, hueAgg: t })), container: "procs", hue: "var(--focus)" });
       p.touches.forEach((t, i) => M.agg(t) && edges.push({ from: "proc:" + p.id, row: i, to: M.agg(t).state, kind: "proc" }));
     }
+    appGraph(M, nodes, edges);
     const ids = new Set(nodes.map((n) => n.id));
     return { nodes: sizeNodes(nodes), edges: edges.filter((e) => ids.has(e.from) && ids.has(e.to)) };
+  }
+  /** Application services, ports, their anti-corruption layers, and the systems behind them. */
+  function appGraph(M, nodes, edges) {
+    const short = (n) => n.split(".").pop();
+    for (const x of M.systems)
+      nodes.push({ id: "sysnode:" + x.id, kind: "system", title: x.name, doc: x.doc, stereo: x.kind || "external system",
+        rows: x.apis.length ? x.apis.map((a) => ({ name: a.id, type: a.doc || "API", doc: a.doc })) : [{ name: "one API", type: "" }],
+        container: "sys:" + x.id, hue: "var(--muted)" });
+    for (const p of M.ports) {
+      const sys = p.system && M.system(p.system);
+      nodes.push({ id: "port:" + p.id, kind: "port", title: short(p.name), doc: p.doc, stereo: "port" + (sys ? " → " + (p.apis.length ? p.apis.join(", ") + " API" + (p.apis.length > 1 ? "s" : "") : "all of " + sys.name) : ""), maxW: 560,
+        rows: p.ops.map((o) => ({ name: o.name, args: o.args.map(argText), ret: o.returns, doc: o.doc })), container: "app", hue: "var(--port)" });
+      p.ops.forEach((o, i) => { for (const r of o.refs) edges.push({ from: "port:" + p.id, row: i, to: r, kind: "dto" }); });
+      if (sys) {
+        if (p.apis.length) p.apis.forEach((a) => edges.push({ from: "port:" + p.id, to: "sysnode:" + sys.id, toRow: sys.apis.findIndex((x) => x.id === a), kind: "fronts" }));
+        else edges.push({ from: "port:" + p.id, to: "sysnode:" + sys.id, kind: "fronts" });
+      }
+      if (p.acl.length) {
+        nodes.push({ id: "acl:" + p.id, kind: "acl", title: short(p.name) + " translator", stereo: "anti-corruption layer",
+          doc: "Turns what " + (sys ? sys.name : "the outside") + " answers into the domain's terms, or says why it can't.",
+          maxW: 520, rows: p.acl.map((f) => { const sp = sigParts(f.signature); return { name: short(f.name), args: sp.args, ret: sp.ret, doc: f.doc }; }), container: "app", hue: "var(--port)" });
+        edges.push({ from: "port:" + p.id, to: "acl:" + p.id, kind: "acl" });
+        p.acl.forEach((f, i) => { for (const r of f.from) edges.push({ from: "acl:" + p.id, row: i, to: r, kind: "acl" }); for (const r of f.to) edges.push({ from: "acl:" + p.id, row: i, to: r, kind: "uses" }); });
+      }
+    }
+    for (const sv of M.services) {
+      nodes.push({ id: "svc:" + sv.id, kind: "service", title: sv.name, doc: sv.doc, stereo: "application service",
+        rows: sv.useCases.map((u) => ({ name: u.id, type: u.asks.length ? "asks " + u.asks.join(", ") : "asks no one", doc: u.doc })), container: "app", hue: "var(--port)" });
+      sv.useCases.forEach((u, i) => {
+        for (const pid of u.asks) edges.push({ from: "svc:" + sv.id, row: i, to: "port:" + pid, kind: "asks" });
+        for (const a of u.changes) { const g = M.agg(a); if (g) edges.push({ from: "svc:" + sv.id, row: i, to: g.state, kind: "changes" }); }
+      });
+    }
   }
   function sizeNodes(nodes) {
     for (const n of nodes) {
@@ -247,7 +302,7 @@
       n.shown = shown;
       let w = Math.max(tw(n.title, F_HEAD) + 44 + (n.seals ? 40 : 0), tw("«" + n.stereo + "»", F_STEREO) + 30);
       for (const r of shown) w = Math.max(w, tw(classRowText(r), F_ROW) + 30);
-      n.w = Math.round(Math.min(MAXW, Math.max(MINW, w)));
+      n.w = Math.round(Math.min(n.maxW || MAXW, Math.max(MINW, w)));
       n.h = HEAD + Math.max(1, shown.length + (n.more ? 1 : 0)) * ROW + PADB;
     }
     return nodes;
@@ -256,7 +311,7 @@
 
   /* ================= layout ================= */
   /* Two levels: ELK lays out what is inside each frame; frames are then packed in rows. */
-  const PAD = { context: [60, 26], aggregate: [48, 16], shared: [48, 16], procs: [48, 16] };
+  const PAD = { context: [60, 26], aggregate: [48, 16], shared: [48, 16], procs: [48, 16], app: [52, 20], system: [48, 16] };
   function shelf(items, aspect, gap) {
     if (!items.length) return { w: 0, h: 0, at: {} };
     const area = items.reduce((s, b) => s + (b.w + gap) * (b.h + gap), 0);
@@ -461,7 +516,7 @@
       <defs>
         <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse" patternTransform=${`translate(${view.x} ${view.y}) scale(${view.k})`}><circle className="grid-dot" cx="1" cy="1" r="1" /></pattern>
         <marker id="end-extends" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="13" markerHeight="13" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1,1 L11,6 L1,11 z" className="mk mk-extends" /></marker>
-        ${["has", "ref", "uses", "msg", "proc", "arg", "identifies", "refuse", "cmd", "evt", "link", "flow"].map((k) => html`<marker key=${k} id=${"end-" + k} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+        ${["has", "ref", "uses", "msg", "proc", "arg", "identifies", "refuse", "cmd", "evt", "link", "flow", "asks", "changes", "dto", "acl", "fronts", "call"].map((k) => html`<marker key=${k} id=${"end-" + k} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
           ${k === "ref" || k === "identifies" || k === "link" ? html`<path d="M1,1 L9,5 L1,9" className=${"mk mk-open mk-" + k} />` : html`<path d="M0,0 L10,5 L0,10 z" className=${"mk mk-" + k} />`}</marker>`)}
         <marker id="start-has" viewBox="0 0 16 10" refX="1" refY="5" markerWidth="15" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1,5 L8,1 L15,5 L8,9 z" className="mk mk-has" /></marker>
       </defs>
@@ -531,7 +586,8 @@
 
   /* ================= class diagram view ================= */
   const LAYERS = [["has", "Composition", true], ["extends", "Extends", true], ["ref", "Reference by id", true], ["msg", "Commands and events", true], ["refuse", "Rejections", true],
-    ["proc", "Processes", true], ["identifies", "Identifier of", true], ["uses", "Uses a shared value", false], ["arg", "Command and event arguments", false]];
+    ["proc", "Processes", true], ["identifies", "Identifier of", true], ["asks", "Use case asks a port", true], ["changes", "Use case changes an aggregate", true],
+    ["dto", "Port operations' DTOs", true], ["acl", "Anti-corruption layer", true], ["fronts", "Port fronts an API", true], ["uses", "Uses a shared value", false], ["arg", "Command and event arguments", false]];
   const loadPos = (key) => { try { const s = localStorage.getItem(key); return s ? JSON.parse(s) : null; } catch (e) { return null; } };
   const savePos = (key, p) => { try { localStorage.setItem(key, JSON.stringify(p)); } catch (e) { /* private mode */ } };
   const forget = (key) => { try { localStorage.removeItem(key); } catch (e) { /* private mode */ } };
@@ -611,7 +667,8 @@
       if (!layers[e.kind] && !touching) return null;
       const ra = rowIndex(a, e.row);
       const ay = ra === undefined ? a.p.y + HEAD / 2 : a.p.y + HEAD + ra * ROW + ROW / 2 - 1;
-      const by = b.p.y + HEAD / 2;
+      const rb = e.toRow === undefined || e.toRow < 0 ? undefined : rowIndex(b, e.toRow);
+      const by = rb === undefined ? b.p.y + HEAD / 2 : b.p.y + HEAD + rb * ROW + ROW / 2 - 1;
       const A = { x: a.p.x, y: a.p.y, w: a.w, h: a.h }, B = { x: b.p.x, y: b.p.y, w: b.w, h: b.h };
       const g = e.from === e.to ? selfLoop(A, ay) : edgePath(A, ay, B, by);
       return html`<g key=${i} className=${`edge e-${e.kind}${touching ? " hot" : ""}${focus && !touching ? " dim" : ""}`}>
@@ -631,7 +688,7 @@
     const [hover, setHover] = useState(null);
     const fitted = useRef(false);
     const relayout = useCallback(async () => {
-      const p = await layout(G.nodes, G.edges, conts, { layoutKinds: ["has", "extends", "msg", "refuse", "proc", "identifies"] });
+      const p = await layout(G.nodes, G.edges, conts, { layoutKinds: ["has", "extends", "msg", "refuse", "proc", "identifies", "asks", "dto", "acl", "fronts"] });
       fitted.current = false; setPos(p);
     }, [G]);
     useEffect(() => {
@@ -901,6 +958,23 @@
   }
 
   /** A process run: its arguments named from the last parameters of its signature. */
+  /** A use case a story step calls: its name, its service, and the values it was given. */
+  function useCaseMessage(M, frame) {
+    const sv = M.service(frame.service.service), u = sv && sv.useCases.find((x) => x.id === frame.service.useCase);
+    const vals = splitArgs(pretty(frame.command, M.ns)).slice(1);
+    const names = u ? [...u.signature.matchAll(/\(([^():]+?)\s*:/g)].flatMap((m) => m[1].trim().split(/\s+/)) : [];
+    const tail = names.slice(Math.max(0, names.length - vals.length));
+    return { name: frame.service.useCase, kind: "use case", sub: sv ? sv.name : frame.service.service, doc: u && u.doc,
+      args: vals.map((t, i) => ({ name: tail[i] ? argName(tail[i]) : `arg ${i + 1}`, text: human(unparen(t)) })) };
+  }
+  /** A port call's answer, in short: a DTO's fields as `name = value`, or the error. */
+  function callAnswer(M, c) {
+    const t = pretty(c.result, M.ns).trim();
+    const m = t.match(/^\{(.*)\}$/s);
+    if (!m) return [t.split(".").pop()];
+    return splitArgs(m[1].replace(/,\s*/g, " , ")).join(" ").split(" , ").map((x) => x.replace(/\s*:=\s*/, " = ").trim()).filter(Boolean);
+  }
+  const failedOf = (frame) => (typeof frame.result === "string" && frame.result.startsWith("failed: ") ? frame.result.slice(8) : null);
   function procMessage(M, frame) {
     const vals = splitArgs(pretty(frame.command, M.ns)).slice(1);
     const p = M.d.processes.find((x) => x.name === frame.via || x.id === frame.via);
@@ -992,7 +1066,8 @@
       const tf = frames(conts, W.nodes.filter((n) => pos[n.id]).map((n) => ({ ...n, p: pos[n.id] })), pos).find((f) => roots[0] && f.id === "agg:" + roots[0].agg);
       const clock = frame.actor === "clock";
       const cmd = clock ? { name: frame.note, kind: "clock", args: [] }
-        : frame.via ? procMessage(M, frame) 
+        : frame.service ? useCaseMessage(M, frame)
+        : frame.via ? procMessage(M, frame)
         : { ...message(M, frame.command, "cmd"), kind: "command" };
       const cw = Math.round(Math.min(360, Math.max(240, tw(cmd.name, F_HEAD) + 40, ...cmd.args.map((a) => tw(`${a.name} = ${a.text}`, F_ROW) + 30))));
       const ch = HEAD + Math.max(clock ? 0 : 1, cmd.args.length) * ROW + (clock ? 6 : 36);
@@ -1009,13 +1084,25 @@
         return b;
       });
       for (const e of evts) e.x = x;
+      // A use case's calls through its ports: outside the domain, left of the use case.
+      const CW = 300;
+      let qy = cbox.y;
+      const calls = (frame.calls || []).map((c, i) => {
+        const p = M.port(c.port), sys = p && p.system && M.system(p.system);
+        const rows = callAnswer(M, c).slice(0, 4);
+        const h = HEAD + (rows.length + 1) * ROW + PADB;
+        const b = { ...c, i, sys: sys ? sys.name : "", rows, x: x - CW - 60, y: qy, w: CW, h };
+        qy += h + 12;
+        return b;
+      });
+      const lane = bboxOf([cbox, ...calls]);
       // What came before stays in the lane, faded, newest nearest: click one to go back to it.
       const PAST = 10, older = Math.max(0, step - 1 - PAST);
       const past = [];
       let py = cbox.y - 18;
       for (let i = step - 1; i >= 1 && i > older; i--) {
         const f = sc.frames[i];
-        const name = f.actor === "clock" ? f.note : f.via || message(M, f.command, "cmd").name;
+        const name = f.actor === "clock" ? f.note : f.service ? f.service.useCase : f.via || message(M, f.command, "cmd").name;
         const evNames = f.ok ? (f.events || []).map((e) => message(M, e, "evt").name) : [];
         const shownEv = evNames.slice(0, 3);
         const h = 26 + (shownEv.length + (evNames.length > 3 ? 1 : 0)) * 15 + (shownEv.length ? 4 : 0);
@@ -1023,7 +1110,7 @@
         past.push({ i, name, ok: f.ok, clock: f.actor === "clock", evNames, shownEv, x, y: py, w: cw, h, agg: (f.targets || [])[0] });
         py -= 8;
       }
-      return { cmd, cbox, roots, evts, clock, past, older, olderY: py - 22 };
+      return { cmd, cbox, lane, calls, roots, evts, clock, past, older, olderY: py - 22 };
     };
     const msgs = useMemo(() => msgsFor(pos), [world, W, step, pos]);
 
@@ -1046,7 +1133,7 @@
         const nb = noted.map(posNode).filter(Boolean).map((n) => ({ x: n.p.x, y: n.p.y, w: n.w + 300, h: Math.min(n.h, 240) }));
         const eb = entered.map(posNode).filter(Boolean).map((n) => ({ x: n.p.x, y: n.p.y, w: n.w, h: Math.min(n.h, 240) }));
         const rb = msgs.roots.map((r) => ({ x: r.p.x, y: r.p.y, w: r.w, h: Math.min(r.h, 200) }));
-        for (const set of [[msgs.cbox, ...rb, ...nb, ...eb], [msgs.cbox, ...nb], [...rb, ...nb], nb]) {
+        for (const set of [[msgs.lane, ...rb, ...nb, ...eb], [msgs.lane, ...nb], [...rb, ...nb], nb]) {
           if (!set.length) continue;
           const f = fitIn(bboxOf(set), 1, 48);
           if (f.k >= 0.62) return f;
@@ -1054,12 +1141,12 @@
         const first = posNode(noted[0]);
         if (first) {
           const fb = { x: first.p.x, y: first.p.y, w: first.w + 300, h: Math.min(first.h, 320) };
-          for (const set of [[msgs.cbox, fb], [fb]]) { const f = fitIn(bboxOf(set), 1, 48); if (f.k >= 0.62) return f; }
+          for (const set of [[msgs.lane, fb], [fb]]) { const f = fitIn(bboxOf(set), 1, 48); if (f.k >= 0.62) return f; }
           const st = stage(), k = 0.75;
           return { k, x: st.w / 2 - (fb.x + fb.w / 2) * k, y: st.top + 40 - fb.y * k };
         }
       }
-      const boxes = [msgs.cbox, ...msgs.roots.map((r) => ({ x: r.p.x, y: r.p.y, w: r.w, h: Math.min(r.h, 260) })), ...msgs.evts.slice(0, 3)];
+      const boxes = [msgs.lane, ...msgs.roots.map((r) => ({ x: r.p.x, y: r.p.y, w: r.w, h: Math.min(r.h, 260) })), ...msgs.evts.slice(0, 3)];
       for (const k of [...new Set([...noted, ...diff.born, ...diff.changed.keys(), ...entered])].slice(0, 8)) {
         const n = posNode(k); if (n) boxes.push({ x: n.p.x, y: n.p.y, w: n.w + (noted.includes(k) ? 300 / Math.max(view.k, 0.5) : 0), h: Math.min(n.h, 200) });
       }
@@ -1068,7 +1155,7 @@
       if (f.k >= 0.72) return f;
       if (msgs.roots.length > 1) {
         // a process: all its aggregates in view matters more than reading every row
-        const all = fitIn(bboxOf([msgs.cbox, ...msgs.roots.map((r) => ({ x: r.p.x, y: r.p.y, w: r.w, h: Math.min(r.h, 160) }))]), 1, 56);
+        const all = fitIn(bboxOf([msgs.lane, ...msgs.roots.map((r) => ({ x: r.p.x, y: r.p.y, w: r.w, h: Math.min(r.h, 160) }))]), 1, 56);
         if (all.k >= 0.42) return all;
       }
       const core = bboxOf(boxes.slice(0, 1 + msgs.roots.length));
@@ -1084,7 +1171,7 @@
     useEffect(() => {
       if (!follow || !tpos || !size.w || !fitted.current) return;
       const m = msgsFor(tpos);
-      if (m && phase === 0 && inView(bboxOf([m.cbox, ...m.roots.map((r) => ({ x: r.p.x, y: r.p.y, w: r.w, h: Math.min(r.h, 200) }))]))) return;
+      if (m && phase === 0 && inView(bboxOf([m.lane, ...m.roots.map((r) => ({ x: r.p.x, y: r.p.y, w: r.w, h: Math.min(r.h, 200) }))]))) return;
       tween(shot(tpos), 700 / speed);
     }, [tpos, follow, step, phase]);
 
@@ -1161,21 +1248,34 @@
       ${pastLayer}
       ${flows.map((fl) => html`<path key=${"f" + fl.key} className="m-flow" d=${fl.d} pathLength="1" markerEnd="url(#end-flow)"
           style=${{ "--h": M.hue(fl.agg), animationDelay: (260 + fl.i * 90) / speed + "ms" }}><title>${fl.label}</title></path>`)}
-      ${!msgs.clock && msgs.roots.map((r, i) => {
+      ${msgs.calls.map((c) => {
+        const g = edgePath(msgs.cbox, msgs.cbox.y + 22 + c.i * 6, c, c.y + 22);
+        return html`<g key=${"c" + c.i} className=${"call-card" + (c.ok ? "" : " bad")} style=${{ animationDelay: (120 + c.i * 140) / speed + "ms" }}>
+          <path className="m-call" d=${g.d} pathLength="1" markerEnd="url(#end-call)" />
+          <g transform=${`translate(${c.x} ${c.y})`}>
+            <title>${c.port}.${c.op}(${c.args}) answered ${c.result}</title>
+            <rect className="n-body" width=${c.w} height=${c.h} rx="9" />
+            <text className="n-stereo" x="14" y="17">«port» ${c.port}${c.sys ? " → " + c.sys : ""}</text>
+            <text className="n-title" x="14" y="35">${clip(`${c.op}(${c.args})`, F_HEAD, c.w - 28)}</text>
+            <text className="n-row c-verdict" x="14" y=${HEAD + 14}>${c.ok ? "answered" : "✕ failed"}</text>
+            ${c.rows.map((r, j) => html`<text key=${j} className="n-row" x="22" y=${HEAD + (j + 1) * ROW + 14}><tspan className="o-val">${clip(r, F_ROW, c.w - 36)}</tspan></text>`)}
+          </g></g>`;
+      })}
+      ${!msgs.clock && !(phase === 1 && failedOf(frame)) && msgs.roots.map((r, i) => {
         const g = edgePath(msgs.cbox, msgs.cbox.y + 22, { x: r.p.x, y: r.p.y, w: r.w, h: r.h }, r.p.y + 16);
         return html`<path key=${"a" + i} className=${"m-arrow" + (phase === 1 && !frame.ok ? " bad" : "")} d=${g.d} pathLength="1"
           markerEnd=${`url(#end-${phase === 1 && !frame.ok ? "refuse" : "cmd"})`} style=${{ animationDuration: 560 / speed + "ms" }} />`;
       })}
-      <g className=${"msg m-" + msgs.cmd.kind + (phase === 1 && !frame.ok ? " refused" : "")} transform=${`translate(${msgs.cbox.x} ${msgs.cbox.y})`}>
+      <g className=${"msg m-" + msgs.cmd.kind.replace(" ", "") + (phase === 1 && !frame.ok ? " refused" : "")} transform=${`translate(${msgs.cbox.x} ${msgs.cbox.y})`}>
         <rect className="n-body" width=${msgs.cbox.w} height=${msgs.cbox.h} rx="9" />
-        <text className="n-stereo" x="14" y="17">«${msgs.cmd.kind}»${frame.actor && !msgs.clock ? " from " + frame.actor : ""}</text>
+        <text className="n-stereo" x="14" y="17">«${msgs.cmd.kind}»${msgs.cmd.sub ? " of " + msgs.cmd.sub : ""}${frame.actor && !msgs.clock ? " from " + frame.actor : ""}</text>
         <text className="n-title" x="14" y="35">${clip(msgs.cmd.name, F_HEAD, msgs.cbox.w - 28)}</text>
         ${msgs.cmd.args.map((a, i) => html`<text key=${i} className="n-row" x="14" y=${HEAD + i * ROW + 14}>
           <tspan className="o-name">${a.name} = </tspan><tspan className="o-val">${clip(a.text, F_ROW, msgs.cbox.w - 28 - tw(a.name + " = ", F_ROW))}</tspan></text>`)}
         ${!msgs.cmd.args.length && !msgs.clock && html`<text className="n-more" x="14" y=${HEAD + 14}>no arguments</text>`}
         ${phase === 1 && !msgs.clock && html`<g className=${"verdict-chip " + (frame.ok ? "ok" : "bad")} transform=${`translate(8 ${msgs.cbox.h - 31})`}>
           <rect width=${msgs.cbox.w - 16} height="23" rx="6" />
-          <text x="10" y="16">${frame.ok ? "✓ accepted" : "✕ refused"}${frame.ok && (frame.findings || []).length ? html`<tspan className="warn">  ⚠ ${plural(frame.findings.length, "warning")}</tspan>` : null}${!frame.ok && reason(frame.error, M.ns, M, frame.targets) ? html`<tspan className="why">  ${clip(reason(frame.error, M.ns, M, frame.targets), F_ROW, msgs.cbox.w - 120)}</tspan>` : null}</text></g>`}
+          <text x="10" y="16">${frame.ok ? "✓ accepted" : failedOf(frame) ? "✕ failed" : "✕ refused"}${failedOf(frame) ? html`<tspan className="why">  ${clip(failedOf(frame), F_ROW, msgs.cbox.w - 110)}<title>Nothing was decided or saved: the domain was never asked.</title></tspan>` : null}${frame.ok && (frame.findings || []).length ? html`<tspan className="warn">  ⚠ ${plural(frame.findings.length, "warning")}</tspan>` : null}${!frame.ok && !failedOf(frame) && reason(frame.error, M.ns, M, frame.targets) ? html`<tspan className="why">  ${clip(reason(frame.error, M.ns, M, frame.targets), F_ROW, msgs.cbox.w - 120)}</tspan>` : null}</text></g>`}
       </g>
       ${phase === 1 && msgs.evts.map((e, i) => {
         const root = posNode(e.agg);
@@ -1198,7 +1298,7 @@
       if (!(phase === 1 || frame.start)) return [];
       const scr = (b) => ({ x: b.x * view.k + view.x, y: b.y * view.k + view.y, w: b.w * view.k, h: b.h * view.k });
       const taken = visible.map((n) => scr({ x: n.p.x, y: n.p.y, w: n.w, h: n.h }));
-      if (msgs) taken.push(scr(msgs.cbox), ...msgs.evts.map(scr));
+      if (msgs) taken.push(scr(msgs.cbox), ...msgs.calls.map(scr), ...msgs.evts.map(scr));
       const t = tellRef.current; if (t) taken.push({ x: t.offsetLeft, y: t.offsetTop, w: t.offsetWidth, h: t.offsetHeight });
       const hit = (r) => taken.some((o) => r.x < o.x + o.w && o.x < r.x + r.w && r.y < o.y + o.h && o.y < r.y + r.h);
       const inside = (r) => r.x >= 8 && r.y >= stage().top && r.x + r.w <= size.w - 8 && r.y + r.h <= size.h - 64;
@@ -1238,7 +1338,7 @@
             return html`<${ObjNode} key=${n.id} o=${o} n=${n} M=${M} sel=${sel === n.id} state=${st} start=${start} delay=${entering && glides ? Math.round(620 / speed) : 0}
               changedRows=${phase === 1 ? diff.changed.get(n.id) : null} prevRows=${diff.was.get(n.id)} />`;
           })]} />
-      <${ZoomBar} setView=${setView} size=${size} fit=${() => tween(fitView(bboxOf([world, msgs && msgs.cbox, ...(msgs ? msgs.evts : [])]), size, 1))} tidy=${() => relayout()} />
+      <${ZoomBar} setView=${setView} size=${size} fit=${() => tween(fitView(bboxOf([world, msgs && msgs.lane, ...(msgs ? msgs.evts : [])]), size, 1))} tidy=${() => relayout()} />
       <div className="tell" ref=${tellRef}>
         <${WorldFacts} sc=${sc} step=${step} />
         <div className="caption" key=${sc.id + ":" + step}>
@@ -1285,6 +1385,9 @@
   }
   function TypeDetail({ id, M, go }) {
     if (id && id.startsWith("proc:")) return html`<${ProcDetail} p=${M.proc(id.slice(5))} M=${M} />`;
+    if (id && id.startsWith("svc:")) return html`<${ServiceDetail} sv=${M.service(id.slice(4))} M=${M} go=${go} />`;
+    if (id && (id.startsWith("port:") || id.startsWith("acl:"))) return html`<${PortDetail} p=${M.port(id.slice(id.indexOf(":") + 1))} M=${M} go=${go} />`;
+    if (id && id.startsWith("sysnode:")) return html`<${SystemDetail} x=${M.system(id.slice(8))} M=${M} go=${go} />`;
     const t = M.types.get(id);
     if (!t) return html`<p className="doc">Nothing selected.</p>`;
     const k = M.kind(t), a = M.aggs.find((x) => x.state === t.id);
@@ -1340,6 +1443,78 @@
         <dd>${t.doc ? plain(t.doc) : html`<span className="nodef">No definition yet</span>`}</dd></div>`)}</dl>
       ${!open && !q && shown.length > 8 && html`<button className="pill" onClick=${() => setOpen(true)}>Show all ${shown.length} terms</button>`}`;
   }
+  /** Type names in a signature, as links where they are types of the model. */
+  function Linked({ text, M, go }) {
+    const byName = new Map(M.d.types.map((t) => [t.name.split(".").pop(), t.id]));
+    const parts = String(text).split(/([A-Za-z_][\w.]*)/);
+    return html`<span>${parts.map((x, i) => (byName.has(x.split(".").pop()) && /^[A-Z]/.test(x)
+      ? html`<button key=${i} className="tlink" onClick=${() => go.type(byName.get(x.split(".").pop()))}>${x}</button>` : x))}</span>`;
+  }
+  function PortRef({ id, M, go }) {
+    const p = M.port(id);
+    return html`<button className="tref port-ref" onClick=${() => go.type("port:" + id)}>${p ? p.name.split(".").pop() : id}</button>`;
+  }
+  function ServiceDetail({ sv, M, go }) {
+    if (!sv) return null;
+    return html`<div>
+      <p className="kicker">«application service» ${plural(sv.useCases.length, "use case")}, each one transaction</p>
+      <h2 className="mono-title">${sv.name}</h2>
+      <${Doc} text=${sv.doc} />
+      <h3>Ports <span className="n">${sv.ports.length}</span></h3>
+      <div className="pills">${sv.ports.length ? sv.ports.map((p) => html`<${PortRef} key=${p} id=${p} M=${M} go=${go} />`) : html`<span className="doc small">It asks no one outside.</span>`}</div>
+      <h3>Use cases <span className="n">${sv.useCases.length}</span></h3>
+      ${sv.useCases.map((u) => html`<div key=${u.id} className="usecase">
+        <div className="uc-head"><b className="mono">${u.id}</b>
+          ${u.changes.map((a) => M.agg(a) && html`<${TypeRef} key=${a} id=${M.agg(a).state} M=${M} go=${go} />`)}</div>
+        <${Doc} text=${u.doc} className="small" />
+        <div className="uc-asks">${u.asks.length ? html`asks ${u.asks.map((p) => html`<${PortRef} key=${p} id=${p} M=${M} go=${go} />`)}` : "asks no one outside"}</div>
+        <pre className="sig"><${Linked} text=${u.signature} M=${M} go=${go} /></pre>
+      </div>`)}
+    </div>`;
+  }
+  function PortDetail({ p, M, go }) {
+    if (!p) return null;
+    const sys = p.system && M.system(p.system);
+    const users = M.services.flatMap((sv) => sv.useCases.filter((u) => u.asks.includes(p.id)).map((u) => [sv, u]));
+    const siblings = M.ports.filter((q) => q.id !== p.id && q.system && q.system === p.system);
+    return html`<div>
+      <p className="kicker">«port» ${p.ops.length} operation${p.ops.length === 1 ? "" : "s"}, owned by the application</p>
+      <h2 className="mono-title">${p.name.split(".").pop()}</h2>
+      <${Doc} text=${p.doc} />
+      ${sys && html`<div className="fronts">
+        <b>Fronts</b> ${p.apis.length ? html`${p.apis.map((a) => html`<span key=${a} className="api">${a}</span>`)} of` : "all of"}
+        <button className="tref" onClick=${() => go.type("sysnode:" + sys.id)}>${sys.name}</button>
+        <p className="doc small">${p.apis.length
+          ? `One port per API: ${sys.name} has ${plural(sys.apis.length, "API")}${siblings.length ? `; ${siblings.map((q) => q.name.split(".").pop()).join(", ")} front${siblings.length === 1 ? "s" : ""} the others` : ""}.`
+          : `One port for the whole of ${sys.name}.`}</p></div>`}
+      <h3>Operations <span className="n">${p.ops.length}</span></h3>
+      ${p.ops.map((o) => html`<div key=${o.name} className="op">
+        <pre className="sig"><b>${o.name}</b>(${o.args.map((a, i) => html`<span key=${i}>${i ? ", " : ""}${a.name}: <${Linked} text=${a.type} M=${M} go=${go} /></span>`)}) → <${Linked} text=${o.returns} M=${M} go=${go} /></pre>
+        <${Doc} text=${o.doc} className="small" /></div>`)}
+      ${p.acl.length > 0 && html`<h3>Anti-corruption layer <span className="n">${p.acl.length}</span></h3>
+        <p className="doc small">No DTO gets past these: they turn ${sys ? sys.name + "'s" : "the outside"} answers into the domain's terms, or say why not.</p>
+        ${p.acl.map((f) => html`<div key=${f.name} className="op"><pre className="sig"><${Linked} text=${f.signature} M=${M} go=${go} /></pre><${Doc} text=${f.doc} className="small" /></div>`)}`}
+      <h3>Asked by <span className="n">${users.length}</span></h3>
+      <div className="pills">${users.map(([sv, u]) => html`<button key=${sv.id + u.id} className="tref" onClick=${() => go.type("svc:" + sv.id)}>${sv.name}.${u.id}</button>`)}</div>
+    </div>`;
+  }
+  function SystemDetail({ x, M, go }) {
+    if (!x) return null;
+    const ports = M.ports.filter((p) => p.system === x.id);
+    const dtos = M.d.types.filter((t) => t.kind === "dto" && t.system === x.id);
+    return html`<div>
+      <p className="kicker">«external system» ${x.kind}</p>
+      <h2>${x.name}</h2>
+      <${Doc} text=${x.doc} />
+      <h3>APIs <span className="n">${x.apis.length}</span></h3>
+      ${x.apis.map((a) => { const by = ports.filter((p) => !p.apis.length || p.apis.includes(a.id));
+        return html`<div key=${a.id} className="api-row"><span className="api">${a.id}</span> <span className="doc small">${a.doc}</span>
+          <span className="pills">${by.length ? by.map((p) => html`<${PortRef} key=${p.id} id=${p.id} M=${M} go=${go} />`) : html`<span className="doc small">no port uses it</span>`}</span></div>`; })}
+      <h3>Its model <span className="n">${dtos.length}</span></h3>
+      <p className="doc small">DTOs: ${x.name}'s own types, which only the ports and their anti-corruption layers see.</p>
+      <div className="pills">${dtos.map((t) => html`<${TypeRef} key=${t.id} id=${t.id} M=${M} go=${go} />`)}</div>
+    </div>`;
+  }
   function Overview({ M, go, layers, setLayers }) {
     const { d } = M;
     const count = (k) => d.types.filter((t) => M.kind(t) === k).length;
@@ -1347,7 +1522,7 @@
       <p className="kicker">Class diagram, read from the compiled Lean</p>
       <h2>${d.title}</h2>
       <${Doc} text=${d.doc} />
-      <div className="kinds">${["aggregate", "entity", "value", "identifier", "enum", "choice", "command", "event", "rejection"].filter((k) => count(k)).map((k) => html`<span key=${k} className="kindcount"><b>${count(k)}</b> ${KIND_N[k][count(k) === 1 ? 0 : 1]}</span>`)}</div>
+      <div className="kinds">${["aggregate", "entity", "value", "identifier", "enum", "choice", "command", "event", "rejection", "dto"].filter((k) => count(k)).map((k) => html`<span key=${k} className="kindcount"><b>${count(k)}</b> ${KIND_N[k][count(k) === 1 ? 0 : 1]}</span>`)}</div>
       <h3>Connections</h3>
       <div className="layers">${LAYERS.map(([k, label]) => html`<label key=${k} className="layer">
         <input type="checkbox" checked=${!!layers[k]} onChange=${(e) => setLayers({ ...layers, [k]: e.target.checked })} />
@@ -1359,6 +1534,10 @@
           <div className="pills">${c.aggregates.map((a) => M.agg(a) && html`<${TypeRef} key=${a} id=${M.agg(a).state} M=${M} go=${go} />`)}</div></div>`)}`}
       ${d.processes.length > 0 && html`<h3>Processes <span className="n">${d.processes.length}</span></h3>
         <div className="pills">${d.processes.map((p) => html`<button key=${p.id} className="tref" onClick=${() => go.type("proc:" + p.id)}>${p.name}</button>`)}</div>`}
+      ${M.services.length > 0 && html`<h3>Application services <span className="n">${M.services.length}</span></h3>
+        <div className="pills">${M.services.map((sv) => html`<button key=${sv.id} className="tref" onClick=${() => go.type("svc:" + sv.id)}>${sv.name}</button>`)}</div>`}
+      ${M.ports.length > 0 && html`<h3>Ports <span className="n">${M.ports.length}</span></h3>
+        ${M.ports.map((p) => html`<div key=${p.id} className="ctx-row"><${PortRef} id=${p.id} M=${M} go=${go} /><span className="doc small">${fronts(M, p)}</span></div>`)}`}
       ${d.theorems.length > 0 && html`<h3>Theorems <span className="n">${d.theorems.length}</span></h3>${d.theorems.map((t) => html`<${Theorem} key=${t.name} t=${t} M=${M} />`)}`}
     </div>`;
   }
@@ -1433,8 +1612,9 @@
       }
       for (const [k, o] of before.objs) if (!cur.objs.has(k)) changes.push({ k, agg: o.agg, label: objLabel(M, o), what: "removed" });
     }
-    const cmd = f.via ? null : message(M, f.command, "cmd");
+    const cmd = f.via || f.service ? null : message(M, f.command, "cmd");
     const o = sel && cur.objs.get(sel);
+    const uc = f.service && useCaseMessage(M, f), failed = failedOf(f);
     return html`<div>
       <p className="kicker">Step ${step} of ${sc.frames.length - 1}</p>
       <h2>${sc.title}</h2>
@@ -1444,14 +1624,21 @@
       <${WorldFacts} sc=${sc} step=${step} />
       ${f.start && !f.say && html`<p className="doc">Press → to send the first command.</p>`}
       ${!f.start && f.actor !== "clock" && html`
-        <div className="who"><span className="badge">${f.actor || "system"}</span><span className="arrow">${f.via ? "runs the process" : "sends"}</span>
-          <code>${f.via || (cmd && cmd.name)}</code><span className="arrow">to</span>
+        <div className="who"><span className="badge">${f.actor || "system"}</span><span className="arrow">${f.service ? "calls" : f.via ? "runs the process" : "sends"}</span>
+          <code>${f.service ? `${uc.sub}.${uc.name}` : f.via || (cmd && cmd.name)}</code><span className="arrow">${f.service ? "which changes" : "to"}</span>
           ${f.targets.map((t) => M.agg(t) && html`<span key=${t} className="pill static" style=${{ "--h": M.hue(t) }}><span className="swatch" />${M.agg(t).name}</span>`)}</div>
         ${cmd && cmd.doc && html`<p className="cmd-def"><code>${cmd.name}</code> ${plain(cmd.doc)}</p>`}
         ${f.via && M.proc(f.via) && M.proc(f.via).doc && html`<p className="cmd-def"><code>${f.via}</code> ${plain(M.proc(f.via).doc)}</p>`}
+        ${uc && uc.doc && html`<p className="cmd-def"><code>${uc.name}</code> ${plain(uc.doc)}</p>`}
+        ${(f.calls || []).length > 0 && html`<h3>Asked outside <span className="n">${f.calls.length}</span></h3>
+          <div className="calls">${f.calls.map((c, i) => { const p = M.port(c.port), sys = p && p.system && M.system(p.system);
+            return html`<button key=${i} className=${"call click" + (c.ok ? "" : " bad")} onClick=${() => go.type("port:" + c.port)} title="Open the port">
+              <span className="c-op">${c.port}.${c.op}</span>(${c.args})${sys ? html` <span className="doc small">→ ${sys.name}</span>` : null}
+              <span className="c-res">${c.ok ? "" : "✕ "}${callAnswer(M, c).join(", ")}</span></button>`; })}</div>`}
         ${phase === 1 ? html`<div className=${"verdict " + (f.ok ? "ok" : "bad")}><span className="mark">${f.ok ? "✓" : "✕"}</span>
-          <span>${f.ok ? (f.events.length ? `Accepted: ${plural(f.events.length, "event")} recorded.` : "Accepted.") : "Refused, so nothing changed."}
-          ${!f.ok && reason(f.error, M.ns, M, f.targets) && html`<span className="why">${reason(f.error, M.ns, M, f.targets)}</span>`}</span></div>` : html`<div className="verdict pending"><span className="mark">…</span><span>${frame0(f)}</span></div>`}`}
+          <span>${f.ok ? (f.events.length ? `Accepted: ${plural(f.events.length, "event")} recorded.` : "Accepted.") : failed ? "Failed before the domain was asked, so nothing was decided or saved." : "Refused, so nothing changed."}
+          ${failed && html`<span className="why">${failed}</span>`}
+          ${!f.ok && !failed && reason(f.error, M.ns, M, f.targets) && html`<span className="why">${reason(f.error, M.ns, M, f.targets)}</span>`}</span></div>` : html`<div className="verdict pending"><span className="mark">…</span><span>${frame0(f)}</span></div>`}`}
       ${phase === 1 && (f.expect || []).length > 0 && html`<p className="checked" title="The build fails if a step does anything other than what its story says">✓ Checked when the domain is built: the story says ${f.expect[0]}.</p>`}
       ${phase === 1 && f.ok && (f.findings || []).length > 0 && html`<div className="verdict warn"><span className="mark">⚠</span>
         <span>Accepted, with ${plural(f.findings.length, "policy warning")}:${f.findings.map((x, i) => html`<span key=${i} className="why">${x}</span>`)}</span></div>`}

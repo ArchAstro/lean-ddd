@@ -21,6 +21,7 @@ then applies to your domain for free.
 | `DDD.Pack` | Dated parameters; rule packs chosen by jurisdiction and adopted version |
 | `DDD.Effects` | Post-commit effects and the compliance record |
 | `DDD.CommandPath` | `submit`: version check, policy, aggregate, append |
+| `DDD.App` | The application layer: `AppError` (refused by the domain, or failed outside it), and `Script`, ports answered by a script that records each call |
 | `DDD.Gate` | Recording mode as a capability: import windows and corrections |
 | `DDD.Settings` | Scoped settings with bounds; narrower scopes may tighten, never loosen |
 | `DDD.Reaction` | Reactions to events, and their modes (automatic, confirm, off) |
@@ -169,6 +170,7 @@ Each page has two views:
    - Connections can be switched on and off by type: composition, extends, reference by id, command → root → event, rejections and processes.
    - Zoomed out, boxes shrink to their names, and the connections between two aggregates become one line labelled with their count.
    - Boxes and frames can be dragged, and their positions are saved per browser.
+   - The **application layer** gets its own frame: each application service with one row per use case (and the ports it asks), each port with one row per operation (`authorize(card: CardToken, amount: Nat) → Except AcquirerError AuthorizationDto`), and each port's anti-corruption layer. Each **external system** gets a frame holding its APIs and its DTOs, the types only ports and their layers see. A port points at the API row it fronts, or at the whole system.
 2. **Scenarios**: stories told on an object diagram, built from the state each aggregate has after each step (`raw`).
    - The page starts blank. An object comes onto it at the first step that creates, changes or targets it, or that a note or `show:` names. The layout grows with the story: each step is laid out with only what is on the page by then, so objects stay together; when room is needed, they glide to their new places and only what the step brings in fades in. The context the story is mostly about sits on top, and the others in a row beneath it, so what arrives at its bottom edge is next to them.
    - Each step has a caption saying what is happening, in plain words, and notes pinned beside the objects they are about. A note whose object is off screen, or has no free spot beside it, docks under the caption; click it to go there. A note naming an object that does not exist is shown as a warning.
@@ -179,6 +181,7 @@ Each page has two views:
    - Earlier commands stay in the lane above the current one, faded, with the events they recorded. Click one to go back to that step.
    - Select an object to inspect it: every field's value now, with records and lists opening as a tree, and its history: each step that created or changed it, the event that did, and each field's old and new value. Click a step to go there.
    - The side panel says what the story claimed the step does, which the build has checked.
+   - A step that calls a use case shows it as «use case» of its service, with each call through a port drawn to its left, outside the domain: what was asked and what came back, red if it failed. A use case that failed before the domain decided gets no arrow to the aggregate, because the domain was never asked.
 
 A domain script names declarations; everything else is read from Lean (`viz/domains/Account.lean` is a complete one):
 
@@ -220,6 +223,36 @@ story happy "happy" "An order, paid"
   - `show: "key", …` brings objects onto the page that the step does not change.
   - Lines before the first `|` tell the opening, blank page.
   - **A story can't be wrong quietly.** `story` runs every step, and the build fails if a step does something other than its `expect:` says, has no `expect:` or `says:`, or has a note or `show:` naming an object that isn't there. The error gives what the step really did and the `expect:` line that would say so. `Examples/Stories.lean` has each mistake and its message.
+
+### Application services, ports and external systems
+
+The domain stays pure; `DDD.App` and the spec describe what sits around it (`Examples/AccountService.lean` is a worked example):
+
+1. **A port** is a structure of operations over a monad, so it can have many functions, each with its own DTOs:
+   ```lean
+   structure Charges (m : Type → Type) where
+     authorize : CardToken → Nat → m (Except AcquirerError AuthorizationDto)
+     capture : String → m (Except AcquirerError CaptureDto)
+   ```
+2. **An anti-corruption layer** is plain functions from DTOs to the domain's terms (`depositOf : CaptureDto → Except String Nat`), so you can prove things about it.
+3. **A use case** takes its ports as arguments and returns `Except (AppError X) _`: `.refused` when the domain says no, `.failed` when the outside is down or answers something the layer won't take.
+4. **The spec** says how they fit together:
+   ```lean
+   systems  := [{ id := "acquirer", name := "Card acquirer", kind := "payment provider",
+                  apis := [("charges", "Holds and captures"), ("refunds", "Money back")] }]
+   ports    := [{ id := "charges", decl := `Charges, system := some "acquirer",
+                  apis := ["charges"],            -- [] = one port for the whole system
+                  acl := [`depositOf, `declineOf] }]
+   services := [{ id := "accounts", name := "Account service", ports := ["charges", "refunds"],
+                  useCases := [{ id := "depositByCard", decl := `depositByCard,
+                                 asks := ["charges"], changes := ["account"] }] }]
+   ```
+   One port per system, or one per API, or anything in between: `apis` lists what each port covers. A type that the aggregates never reach, but a port or its layer does, is drawn as a DTO of that port's system.
+5. **In a story**, `serviceBeat` runs a use case with its ports answered by a `Script` (`Script.reply "charges" "authorize" args answer`). Every call is recorded.
+   - `asks: "charges.authorize", "charges.capture"` says which calls a step makes, in order. A step that makes calls must say so, and must name exactly the calls it makes (`asks:` with nothing after it says it calls none).
+   - `expect: failed "card-declined"` says the use case failed before the domain decided.
+
+The build checks all of it: a port, layer or use case naming a declaration that doesn't exist; a port naming a system, or an API of it, that doesn't exist; a use case asking a port its service doesn't have, or changing an aggregate that doesn't exist; a story calling a port its use case's spec doesn't list; and a step whose `asks:` or `expect:` is wrong.
 
 - `submitBeat` sends one command through `submit`, with the domain's rules and context.
 - A hand-built `Beat` can run a process (set `via`) or advance a clock.

@@ -4,6 +4,7 @@ import DDD.Policy
 import DDD.Pack
 import DDD.Effects
 import DDD.CommandPath
+import DDD.App
 import DDD.Gate
 import DDD.Settings
 import DDD.Reaction
